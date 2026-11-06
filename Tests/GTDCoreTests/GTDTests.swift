@@ -262,14 +262,66 @@ final class GTDTests: XCTestCase {
         XCTAssertNil(ThirdSlot.load(config: withDefault, defaults))
     }
 
-    func testAC5TargetPrefersOwnerSession() throws {
-        let withSession = row("s").replacingOccurrences(
+    func action(_ title: String, parent: String, session: String = "", status: String = "Active") -> String {
+        """
+        {"Outcome":"\(title)","url":"https://n/act-\(title)","Owner Session":"\(session)",\
+        "GTD Status":"\(status)","parents":["\(parent)"]}
+        """
+    }
+
+    func snapshot(_ rows: [String], actions: [String]?) throws -> Snapshot {
+        let list = actions.map { "[\($0.joined(separator: ","))]" } ?? "null"
+        let json = "{\"fetchedAt\":\"2026-11-03T14:00:00+00:00\",\"rows\":[\(rows.joined(separator: ","))],\"actions\":\(list)}"
+        return try Snapshot.decode(Data(json.utf8))
+    }
+
+    func jump(_ snap: Snapshot, _ index: Int = 0) -> (Jump.Kind, String?) {
+        let j = snap.jump(for: snap.rows[index])
+        return (j.kind, j.url?.absoluteString.removingPercentEncoding)
+    }
+
+    func testAC5ProjectOwnerSessionComesFirst() throws {
+        let withSession = row("p", next: "寫說明").replacingOccurrences(
             of: #""Owner Session":"""#, with: #""Owner Session":"claude://claude.ai/epitaxy/local_1""#)
-        let rows = try decode([withSession, row("n")])
-        XCTAssertEqual(rows[0].target?.absoluteString, "claude://claude.ai/epitaxy/local_1")
-        XCTAssertTrue(rows[0].opensSession)
-        XCTAssertEqual(rows[1].target?.absoluteString, "https://n/n")
-        XCTAssertFalse(rows[1].opensSession)
+        let snap = try snapshot([withSession], actions: [action("寫說明", parent: "p", session: "claude://claude.ai/epitaxy/local_2")])
+        XCTAssertTrue(jump(snap) == (.session, "claude://claude.ai/epitaxy/local_1"))
+    }
+
+    func testAC5UsesSessionOfOpenChildActionNamedByNextAction() throws {
+        let snap = try snapshot([row("p", next: "寫說明")], actions: [
+            action("別的事", parent: "p", session: "claude://claude.ai/epitaxy/local_9"),
+            action("寫說明", parent: "other", session: "claude://claude.ai/epitaxy/local_8"),
+            action("寫說明", parent: "p", session: "claude://claude.ai/epitaxy/local_2"),
+        ])
+        XCTAssertTrue(jump(snap) == (.session, "claude://claude.ai/epitaxy/local_2"))
+    }
+
+    func testAC5MatchedActionWithoutSessionOpensActionPage() throws {
+        let snap = try snapshot([row("p", next: "寫\\\\_說明")], actions: [action("寫_說明", parent: "p")])
+        XCTAssertTrue(jump(snap) == (.action, "https://n/act-寫_說明"))
+    }
+
+    func testAC5TitleMismatchFallsBackToProjectPage() throws {
+        let snap = try snapshot([row("p", next: "寫說明")], actions: [
+            action("寫 changelog", parent: "p", session: "claude://claude.ai/epitaxy/local_2"),
+        ])
+        XCTAssertTrue(jump(snap) == (.notion, "https://n/p"))
+    }
+
+    func testAC5DoneOrDroppedActionIsIgnored() throws {
+        let snap = try snapshot([row("p", next: "寫說明")], actions: [
+            action("寫說明", parent: "p", session: "claude://claude.ai/epitaxy/local_2", status: "Done"),
+            action("寫說明", parent: "p", session: "claude://claude.ai/epitaxy/local_3", status: "Dropped"),
+        ])
+        XCTAssertTrue(jump(snap) == (.notion, "https://n/p"))
+    }
+
+    func testAC27SnapshotWithoutActionsUsesOnlyProjectFields() throws {
+        let old = #"{"fetchedAt":"2026-11-03T14:00:00+00:00","rows":[\#(row("p"))]}"#
+        let snap = try Snapshot.decode(Data(old.utf8))
+        XCTAssertNil(snap.actions)
+        XCTAssertTrue(jump(snap) == (.notion, "https://n/p"))
+        XCTAssertTrue(jump(try snapshot([row("p")], actions: nil)) == (.notion, "https://n/p"))
     }
 
     func testAC6SnapshotStaleAfterFiveMinutes() throws {

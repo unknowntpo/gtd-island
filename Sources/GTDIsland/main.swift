@@ -223,8 +223,12 @@ final class Store: ObservableObject {
         }
     }
 
+    func jump(for project: Project) -> Jump {
+        snapshot?.jump(for: project) ?? Jump.resolve(project, actions: [])
+    }
+
     func open(_ project: Project) {
-        if let target = project.target { NSWorkspace.shared.open(target) }
+        if let target = jump(for: project).url { NSWorkspace.shared.open(target) }
         collapse()
     }
 
@@ -261,16 +265,17 @@ extension Store {
 struct RowView: View {
     let index: Int?
     let project: Project
+    let jump: Jump
     let action: () -> Void
     @State private var isHovering = false
 
     /// A session is the main way back into work, so it reads as a filled button.
     var openLabel: some View {
-        Text(project.opensSession ? "打開 session ↗" : "打開 Notion ↗")
+        Text(jump.label)
             .font(.system(size: 11, weight: .semibold))
-            .foregroundColor(project.opensSession ? .islandBackground : .islandAccent)
+            .foregroundColor(jump.kind == .session ? .islandBackground : .islandAccent)
             .padding(.horizontal, 8).padding(.vertical, 3)
-            .background(project.opensSession ? Color.islandAccent : Color.clear)
+            .background(jump.kind == .session ? Color.islandAccent : Color.clear)
             .overlay(Capsule().stroke(Color.islandAccent))
             .clipShape(Capsule())
     }
@@ -487,12 +492,12 @@ struct ExpandedView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         if view.actionable.isEmpty { Text("這裡目前沒有可動手的下一步。").foregroundColor(.islandMuted).font(.system(size: 13)) }
                         ForEach(Array(view.actionable.enumerated()), id: \.element.id) { i, project in
-                            RowView(index: i < 9 ? i + 1 : nil, project: project) { store.open(project) }
+                            RowView(index: i < 9 ? i + 1 : nil, project: project, jump: store.jump(for: project)) { store.open(project) }
                         }
                         if !view.waiting.isEmpty {
                             Text("等別人").font(.system(size: 11, weight: .semibold)).foregroundColor(.islandMuted).padding(.top, 6)
                             ForEach(view.waiting) { project in
-                                RowView(index: nil, project: project) { store.open(project) }.opacity(0.7)
+                                RowView(index: nil, project: project, jump: store.jump(for: project)) { store.open(project) }.opacity(0.7)
                             }
                         }
                     }

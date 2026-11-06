@@ -62,9 +62,58 @@ public struct Project: Decodable, Equatable, Identifiable {
 
     public var isWaiting: Bool { nextAction.hasPrefix("等") || !waitingFor.isEmpty }
 
-    /// The session when one owns the work, otherwise the Notion page.
-    public var target: URL? { URL(string: ownerSession.isEmpty ? url : ownerSession) }
-    public var opensSession: Bool { !ownerSession.isEmpty }
+    /// The page id that `Parent Project` relations point to.
+    var pageID: String { url.split(separator: "/").last.map(String.init) ?? "" }
+}
+
+/// An open Action, read so a Project can jump to the session of its next Action.
+public struct ActionItem: Decodable, Equatable {
+    public let title: String
+    public let url: String
+    public let ownerSession: String
+    public let status: String
+    public let parents: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case title = "Outcome", url, ownerSession = "Owner Session", status = "GTD Status", parents
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func text(_ key: CodingKeys) -> String { (try? c.decode(String.self, forKey: key)) ?? "" }
+        title = Project.plainText(text(.title))
+        url = text(.url)
+        ownerSession = text(.ownerSession)
+        status = text(.status)
+        parents = (try? c.decode([String].self, forKey: .parents)) ?? []
+    }
+
+    var isOpen: Bool { status != "Done" && status != "Dropped" }
+}
+
+/// Where a row's button goes, and what it says.
+public struct Jump: Equatable {
+    public enum Kind: Equatable { case session, action, notion }
+    public let kind: Kind
+    public let url: URL?
+
+    public var label: String {
+        switch kind {
+        case .session: return "打開 session ↗"
+        case .action: return "打開 Action ↗"
+        case .notion: return "打開 Notion ↗"
+        }
+    }
+
+    /// The Project's session, then the session or page of the open child Action
+    /// whose title is the Project's `Next Action`, then the Project page.
+    public static func resolve(_ project: Project, actions: [ActionItem]) -> Jump {
+        if !project.ownerSession.isEmpty { return Jump(kind: .session, url: URL(string: project.ownerSession)) }
+        let next = actions.first { $0.isOpen && $0.parents.contains(project.pageID) && $0.title == project.nextAction }
+        if let next, !next.ownerSession.isEmpty { return Jump(kind: .session, url: URL(string: next.ownerSession)) }
+        if let next { return Jump(kind: .action, url: URL(string: next.url)) }
+        return Jump(kind: .notion, url: URL(string: project.url))
+    }
 }
 
 public struct GTDTab: Hashable, Identifiable {
@@ -244,6 +293,10 @@ public struct Snapshot: Decodable, Equatable {
     public let rows: [Project]
     /// Nil when the snapshot came from a path that cannot read Time Log.
     public let timeLog: [TimeEntry]?
+    /// Nil when the snapshot came from a path that cannot read Actions.
+    public let actions: [ActionItem]?
+
+    public func jump(for project: Project) -> Jump { Jump.resolve(project, actions: actions ?? []) }
 
     public static func decode(_ data: Data) throws -> Snapshot {
         let decoder = JSONDecoder()

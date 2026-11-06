@@ -17,12 +17,14 @@
 - AC2 「先看這 3 件」最多 3 項,不含等別人的項目。
 - AC3 `Next Action` 以「等」開頭,或 `Waiting For` 有值,就算等別人。
 - AC4 分頁來自 `~/.gtd-island/config.json` 的 `tabs`,見「分頁設定檔」。
-- AC5 跳轉目標:`Owner Session` 優先,其次 Notion 頁面。
+- AC5 跳轉目標依序是:(1) Project 的 `Owner Session`;(2) 開著的子 Action 中,標題等於 Project `Next Action` 的那一個的 `Owner Session`;(3) 該 Action 的 Notion 頁面;(4) Project 的 Notion 頁面。「開著」指 `GTD Status` 不是 Done 或 Dropped。按鈕依目標顯示「打開 session ↗」「打開 Action ↗」或「打開 Notion ↗」。
+  Example:Project「發布 1.0」沒有 `Owner Session`,`Next Action` 是「寫發布說明」。它的子 Action「寫發布說明」的 `Owner Session` 是 `claude://claude.ai/epitaxy/local_7`。面板顯示「打開 session ↗」,點擊打開 local_7。子 Action 改名成「寫 changelog」後,面板改顯示「打開 Notion ↗」,點擊打開 Project 頁面。
 - AC6 快照超過 5 分鐘算過期,展開時自動更新;更新失敗時保留舊資料並顯示錯誤。
 - AC7 真實格式的 view 資料可以解析,多餘欄位不影響。
 - AC8 面板懸浮在其他視窗上,打開時不搶走目前 app 的焦點;滑鼠移到膠囊上或點擊就展開,Option+G 切換,`Esc` 或點外面收起,數字鍵跳轉。
 - AC9 macOS Keychain 有 `gtd-island-notion` token 時,`refresh.py` 直接呼叫 Notion API 查 GTD Items:`Item Type` 是 Project 且 `GTD Status` 是 Active,依 `Last Worked` 新到舊,讀完所有分頁。輸出的欄位名稱和格式與原本的 view 資料相同。
 - AC10 沒有 token 或 API 失敗時,`refresh.py` 改走原本的 `claude` 路徑。token 不寫進檔案或輸出。
+- AC27 有 token 時,`refresh.py` 另外查開著的 Action(`Item Type` 是 Action,`GTD Status` 不是 Done 也不是 Dropped),寫進快照的 `actions`。每筆含標題、頁面、`Owner Session`、`GTD Status` 和 `Parent Project` 的頁面 id。這個查詢失敗時 `actions` 是 null,Project 列照常更新,跳轉只用 AC5 的 (1) 和 (4)。
 
 ### 找 session prototype(2026-11-04)
 目的:先看效果,再決定細節。使用者輸入一句話,相關的 session 要列在上方。排名不必精準。

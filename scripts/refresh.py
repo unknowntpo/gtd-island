@@ -87,7 +87,41 @@ def fetch_time_log():
         return None
 
 
-def query_pages(token, conditions, data_source=None, sort="Last Worked"):
+def action_row(page):
+    """An open Action, with only what the panel needs to pick a jump target."""
+    row = flatten(page)
+    parents = page["properties"].get("Parent Project", {}).get("relation", [])
+    return {
+        "Outcome": row.get("Outcome", ""),
+        "url": row["url"],
+        "Owner Session": row.get("Owner Session", ""),
+        "GTD Status": row.get("GTD Status", ""),
+        "parents": [p["id"].replace("-", "") for p in parents],
+    }
+
+
+def query_actions(token):
+    """Open Actions, so a Project without `Owner Session` can jump to its next Action's session."""
+    return query_pages(token, [
+        {"property": "Item Type", "select": {"equals": "Action"}},
+        {"property": "GTD Status", "select": {"does_not_equal": "Done"}},
+        {"property": "GTD Status", "select": {"does_not_equal": "Dropped"}},
+    ], shape=action_row)
+
+
+def fetch_actions():
+    """Return None when Actions cannot be read, so a failure never blocks the Project rows."""
+    token = read_token()
+    if not token:
+        return None
+    try:
+        return query_actions(token)
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as error:
+        sys.stderr.write(f"Notion Action query failed ({error})\n")
+        return None
+
+
+def query_pages(token, conditions, data_source=None, sort="Last Worked", shape=flatten):
     body = {
         "filter": {"and": conditions},
         "sorts": [{"property": sort, "direction": "descending"}],
@@ -102,7 +136,7 @@ def query_pages(token, conditions, data_source=None, sort="Last Worked"):
         })
         with urllib.request.urlopen(request, timeout=20) as response:
             data = json.loads(response.read())
-        rows += [flatten(page) for page in data["results"]]
+        rows += [shape(page) for page in data["results"]]
         if not data.get("has_more"):
             return rows
         body["start_cursor"] = data["next_cursor"]
@@ -182,7 +216,7 @@ def main():
     tmp = OUT + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"fetchedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"), "rows": rows,
-                   "timeLog": fetch_time_log()},
+                   "timeLog": fetch_time_log(), "actions": fetch_actions()},
                   f, ensure_ascii=False, indent=1)
     os.replace(tmp, OUT)
     print(f"saved {len(rows)} rows")

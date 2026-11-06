@@ -85,6 +85,53 @@ class QueryTests(unittest.TestCase):
         self.assertIn("data-source-id", first.full_url)
 
 
+class ActionTests(unittest.TestCase):
+    def test_ac27_queries_open_actions_and_keeps_parent_ids(self):
+        parent = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        action = page("寫說明", **{})
+        action["properties"]["Parent Project"]["relation"] = [{"id": parent}]
+        action["properties"]["GTD Status"] = {"type": "select", "select": {"name": "Active"}}
+        sent = []
+
+        def respond(request, timeout):
+            sent.append(json.loads(request.data))
+            return FakeResponse({"results": [action], "has_more": False})
+
+        with mock.patch("urllib.request.urlopen", respond):
+            rows = refresh.query_actions("secret")
+        self.assertEqual(sent[0]["filter"], {"and": [
+            {"property": "Item Type", "select": {"equals": "Action"}},
+            {"property": "GTD Status", "select": {"does_not_equal": "Done"}},
+            {"property": "GTD Status", "select": {"does_not_equal": "Dropped"}},
+        ]})
+        self.assertEqual(rows, [{
+            "Outcome": "寫說明",
+            "url": "https://app.notion.com/p/11111111222243338444555555555555",
+            "Owner Session": "claude://claude.ai/epitaxy/local_1",
+            "GTD Status": "Active",
+            "parents": ["aaaaaaaabbbb4ccc8dddeeeeeeeeeeee"],
+        }])
+
+    def test_ac27_failure_or_no_token_gives_none(self):
+        with mock.patch.object(refresh, "read_token", return_value=None):
+            self.assertIsNone(refresh.fetch_actions())
+        with mock.patch.object(refresh, "read_token", return_value="secret"), \
+                mock.patch.object(refresh, "query_actions", side_effect=urllib.error.URLError("boom")), \
+                mock.patch("sys.stderr"):
+            self.assertIsNone(refresh.fetch_actions())
+
+    def test_ac27_main_writes_actions_into_the_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(refresh, "OUT", os.path.join(tmp, "snapshot.json")), \
+                mock.patch.object(refresh, "fetch_rows", return_value=[{"Outcome": "p"}]), \
+                mock.patch.object(refresh, "fetch_time_log", return_value=None), \
+                mock.patch.object(refresh, "fetch_actions", return_value=[{"Outcome": "a"}]), \
+                mock.patch("builtins.print"):
+            self.assertEqual(refresh.main(), 0)
+            with open(os.path.join(tmp, "snapshot.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["actions"], [{"Outcome": "a"}])
+
+
 class FallbackTests(unittest.TestCase):
     def test_ac9_uses_api_when_token_exists(self):
         with mock.patch.object(refresh, "read_token", return_value="secret"), \

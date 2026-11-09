@@ -479,7 +479,11 @@ struct ExpandedView: View {
                         .padding(.horizontal, 6).padding(.vertical, 4)
                 }
                 Spacer()
+                Image(systemName: "line.3.horizontal").font(.system(size: 11)).foregroundColor(.islandMuted)
+                    .help("拖曳移動面板")
             }
+            .contentShape(Rectangle())
+            .modifier(PanelDrag())
             if let error = store.error {
                 Text("× \(error)").font(.system(size: 12)).foregroundColor(Color(red: 0.96, green: 0.69, blue: 0.67))
             }
@@ -534,8 +538,17 @@ struct RootView: View {
         if store.isExpanded {
             ExpandedView(store: store)
         } else {
-            PillView(store: store).onTapGesture(perform: tap).onHover(perform: hover)
+            PillView(store: store).onTapGesture(perform: tap).onHover(perform: hover).modifier(PanelDrag())
         }
+    }
+}
+
+/// Moving more than 3 points drags the panel; a shorter press stays a click.
+struct PanelDrag: ViewModifier {
+    func body(content: Content) -> some View {
+        content.gesture(DragGesture(minimumDistance: 3)
+            .onChanged { _ in AppDelegate.shared?.dragMoved() }
+            .onEnded { _ in AppDelegate.shared?.dragEnded() })
     }
 }
 
@@ -550,6 +563,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hotKey: EventHotKeyRef?
     var findHotKey: EventHotKeyRef?
     var hoverOpen: DispatchWorkItem?
+    /// The top center of the pill, chosen by dragging; nil means the default place.
+    var anchor: CGPoint?
+    var dragOffset: CGPoint?
     static var shared: AppDelegate!
     let pillSize = NSSize(width: 340, height: 30)
     let expandedSize = NSSize(width: 480, height: 560)
@@ -573,6 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // The panel's frame comes only from `frame(for:)`; SwiftUI must not resize the window.
         host.sizingOptions = []
         panel.contentView = host
+        anchor = Placement.load(.standard, screens: NSScreen.screens.map(\.frame))
         panel.setFrame(frame(for: pillSize), display: true)
         panel.orderFrontRegardless()
         store.load()
@@ -580,6 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         registerHotKey()
 
         if CommandLine.arguments.contains("--selftest") { runSelfTest(); return }
+        if CommandLine.arguments.contains("--selftest-drag") { runDragSelfTest(); return }
         if let flag = CommandLine.arguments.firstIndex(of: "--selftest-find"), flag + 1 < CommandLine.arguments.count {
             runFindSelfTest(query: CommandLine.arguments[flag + 1]); return
         }
@@ -621,6 +639,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// Drags the pill to the top-right corner with simulated mouse points, then checks
+    /// the expanded panel stays on screen and the point is saved. Leaves no saved point behind.
+    func runDragSelfTest() {
+        let visible = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        let start = CGPoint(x: panel.frame.midX, y: panel.frame.midY)
+        dragMoved(to: start)
+        dragMoved(to: CGPoint(x: start.x + 2000, y: start.y + 500))
+        dragEnded()
+        let pill = panel.frame
+        let saved = Placement.load(.standard, screens: NSScreen.screens.map(\.frame))
+        setExpanded(true)
+        let expanded = panel.frame
+        setExpanded(false)
+        let ok = pill.maxX == visible.maxX && pill.maxY == visible.maxY && saved == Placement.anchor(for: pill)
+            && visible.contains(expanded) && expanded.maxY == pill.maxY && expanded.maxX == visible.maxX
+        print(ok ? "PASS" : "FAIL", "pill", pill, "expanded", expanded, "saved", saved as Any, "visible", visible)
+        UserDefaults.standard.removeObject(forKey: "panelAnchor")
+        exit(ok ? 0 : 1)
+    }
+
     /// Checks focus on both paths, then runs one real query through `route.py`.
     func runFindSelfTest(query: String) {
         setExpanded(true)
@@ -649,9 +687,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func frame(for size: NSSize) -> NSRect {
-        let screen = NSScreen.main ?? NSScreen.screens[0]
-        let visible = screen.visibleFrame
-        return NSRect(x: (visible.midX - size.width / 2).rounded(), y: visible.maxY - size.height - 4, width: size.width, height: size.height)
+        let held = anchor.flatMap { point in NSScreen.screens.first { $0.frame.insetBy(dx: -1, dy: -1).contains(point) } }
+        let visible = (held ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        let point = held == nil ? Placement.defaultAnchor(visible) : anchor!
+        return Placement.frame(size: size, anchor: point, visible: visible)
+    }
+
+    func dragMoved(to mouse: CGPoint = NSEvent.mouseLocation) {
+        if dragOffset == nil {
+            hoverOpen?.cancel()
+            hoverOpen = nil
+            dragOffset = CGPoint(x: mouse.x - panel.frame.minX, y: mouse.y - panel.frame.minY)
+        }
+        guard let offset = dragOffset else { return }
+        let origin = CGPoint(x: mouse.x - offset.x, y: mouse.y - offset.y)
+        // Keep the point on the screen under the mouse; a point off every screen means "default".
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]
+        let raw = Placement.anchor(for: CGRect(origin: origin, size: panel.frame.size))
+        anchor = Placement.anchor(for: Placement.frame(size: panel.frame.size, anchor: raw, visible: screen.visibleFrame))
+        panel.setFrame(targetFrame, display: true)
+    }
+
+    func dragEnded() {
+        dragOffset = nil
+        let point = Placement.anchor(for: targetFrame)
+        anchor = point
+        Placement.save(point, .standard)
     }
 
     var targetFrame: NSRect { frame(for: store.isExpanded ? expandedSize : pillSize) }
@@ -668,7 +729,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hoverOpen?.cancel()
         hoverOpen = nil
         guard inside, !store.isExpanded else { return }
-        let work = DispatchWorkItem { [weak self] in self?.setExpanded(true) }
+        // A press on the pill may be the start of a drag, so it does not open the panel.
+        let work = DispatchWorkItem { [weak self] in
+            if NSEvent.pressedMouseButtons == 0 { self?.setExpanded(true) }
+        }
         hoverOpen = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }

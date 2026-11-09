@@ -324,6 +324,49 @@ final class GTDTests: XCTestCase {
         XCTAssertTrue(jump(try snapshot([row("p")], actions: nil)) == (.notion, "https://n/p"))
     }
 
+    let visible = CGRect(x: 0, y: 0, width: 1440, height: 875)
+    let pillSize = CGSize(width: 340, height: 30)
+    let panelSize = CGSize(width: 480, height: 560)
+
+    func testAC30DefaultIsTopCenterFourPointsDown() {
+        let anchor = Placement.defaultAnchor(visible)
+        XCTAssertEqual(Placement.frame(size: pillSize, anchor: anchor, visible: visible),
+                       CGRect(x: 550, y: 875 - 30 - 4, width: 340, height: 30))
+    }
+
+    func testAC29PanelGrowsDownFromTheSameTopCenter() {
+        let anchor = CGPoint(x: 700, y: 600)
+        let pill = Placement.frame(size: pillSize, anchor: anchor, visible: visible)
+        let panel = Placement.frame(size: panelSize, anchor: anchor, visible: visible)
+        XCTAssertEqual(pill.midX, panel.midX)
+        XCTAssertEqual(pill.maxY, panel.maxY)
+        XCTAssertEqual(Placement.anchor(for: pill), anchor)
+    }
+
+    func testAC29PanelIsPushedBackInsideTheVisibleArea() {
+        let corner = CGPoint(x: 1430, y: 875)
+        XCTAssertEqual(Placement.frame(size: panelSize, anchor: corner, visible: visible),
+                       CGRect(x: 960, y: 315, width: 480, height: 560))
+        let low = CGPoint(x: 10, y: 100)
+        XCTAssertEqual(Placement.frame(size: panelSize, anchor: low, visible: visible),
+                       CGRect(x: 0, y: 0, width: 480, height: 560))
+    }
+
+    func testAC28SavedPositionSurvivesReload() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "gtd-island-test-\(UUID())"))
+        XCTAssertNil(Placement.load(defaults, screens: [visible]))
+        Placement.save(CGPoint(x: 1200, y: 870), defaults)
+        XCTAssertEqual(Placement.load(defaults, screens: [visible]), CGPoint(x: 1200, y: 870))
+    }
+
+    func testAC30SavedPointOffEveryScreenIsIgnored() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "gtd-island-test-\(UUID())"))
+        Placement.save(CGPoint(x: 2000, y: 500), defaults)
+        XCTAssertNil(Placement.load(defaults, screens: [visible]))
+        let external = CGRect(x: 1440, y: 0, width: 1920, height: 1080)
+        XCTAssertEqual(Placement.load(defaults, screens: [visible, external]), CGPoint(x: 2000, y: 500))
+    }
+
     func testAC6SnapshotStaleAfterFiveMinutes() throws {
         let json = #"{"fetchedAt":"2026-11-03T14:00:00+00:00","rows":[]}"#
         let snapshot = try Snapshot.decode(Data(json.utf8))

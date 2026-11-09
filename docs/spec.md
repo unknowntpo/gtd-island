@@ -22,6 +22,10 @@
 - AC6 快照超過 5 分鐘算過期,展開時自動更新;更新失敗時保留舊資料並顯示錯誤。
 - AC7 真實格式的 view 資料可以解析,多餘欄位不影響。
 - AC8 面板懸浮在其他視窗上,打開時不搶走目前 app 的焦點;滑鼠移到膠囊上或點擊就展開,Option+G 切換,`Esc` 或點外面收起,數字鍵跳轉。
+- AC28 拖曳膠囊,或拖曳展開面板分頁列的空白處和右端的把手,可以移動面板。移動超過 3 點才算拖曳,否則照常是點擊。放開後位置存起來,重開 app 後保留。
+- AC29 位置以膠囊上緣的中點為準:面板展開時,上緣中點對齊這一點,再往下長。面板超出這一點所在螢幕的可見範圍時,往內推到剛好留在範圍內。
+- AC30 沒存過位置,或存的點不在任何螢幕上時,用預設位置:主螢幕可見範圍上緣置中、往下 4 點。
+  Example:使用者把膠囊拖到螢幕右上角,讓開 Chrome 的網址列。滑鼠移上去,面板向下展開,右緣貼齊螢幕右緣,不會超出。重開 app 後,膠囊還在右上角。外接螢幕拔掉後,膠囊回到主螢幕上緣中央。
 - AC9 macOS Keychain 有 `gtd-island-notion` token 時,`refresh.py` 直接呼叫 Notion API 查 GTD Items:`Item Type` 是 Project 且 `GTD Status` 是 Active,依 `Last Worked` 新到舊,讀完所有分頁。輸出的欄位名稱和格式與原本的 view 資料相同。
 - AC10 沒有 token 或 API 失敗時,`refresh.py` 改走原本的 `claude` 路徑。token 不寫進檔案或輸出。
 - AC27 有 token 時,`refresh.py` 另外查開著的 Action(`Item Type` 是 Action,`GTD Status` 不是 Done 也不是 Dropped),寫進快照的 `actions`。每筆含標題、頁面、`Owner Session`、`GTD Status` 和 `Parent Project` 的頁面 id。這個查詢失敗時 `actions` 是 null,Project 列照常更新,跳轉只用 AC5 的 (1) 和 (4)。

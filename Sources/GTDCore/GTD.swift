@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 public struct Project: Decodable, Equatable, Identifiable {
@@ -363,5 +364,39 @@ public enum ThirdSlot {
 
     public static func save(_ tab: GTDTab?, _ defaults: UserDefaults = .standard) {
         defaults.set(tab?.name ?? "", forKey: key)
+    }
+}
+
+/// Where the panel sits. The point is the top center of the pill; the expanded
+/// panel hangs down from the same point and is kept inside the visible area.
+public enum Placement {
+    static let key = "panelAnchor"
+    public static let gap: CGFloat = 4
+
+    public static func defaultAnchor(_ visible: CGRect) -> CGPoint {
+        CGPoint(x: visible.midX, y: visible.maxY - gap)
+    }
+
+    public static func frame(size: CGSize, anchor: CGPoint, visible: CGRect) -> CGRect {
+        let x = min(max((anchor.x - size.width / 2).rounded(), visible.minX), visible.maxX - size.width)
+        let y = min(max(anchor.y - size.height, visible.minY), visible.maxY - size.height)
+        return CGRect(x: x, y: y, width: size.width, height: size.height)
+    }
+
+    public static func anchor(for frame: CGRect) -> CGPoint { CGPoint(x: frame.midX, y: frame.maxY) }
+
+    static func isOn(_ point: CGPoint, _ screen: CGRect) -> Bool {
+        (screen.minX...screen.maxX).contains(point.x) && (screen.minY...screen.maxY).contains(point.y)
+    }
+
+    /// The saved point, or nil when there is none or no screen holds it any more.
+    public static func load(_ defaults: UserDefaults, screens: [CGRect]) -> CGPoint? {
+        guard let pair = defaults.array(forKey: key) as? [Double], pair.count == 2 else { return nil }
+        let point = CGPoint(x: pair[0], y: pair[1])
+        return screens.contains { isOn(point, $0) } ? point : nil
+    }
+
+    public static func save(_ point: CGPoint, _ defaults: UserDefaults) {
+        defaults.set([Double(point.x), Double(point.y)], forKey: key)
     }
 }

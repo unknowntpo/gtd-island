@@ -195,13 +195,22 @@ final class Store: ObservableObject {
     }
 
     func refresh(apiOnly: Bool = false) {
+        run(apiOnly ? ["--api-only"] : [], failure: "更新失敗,目前顯示舊資料。請確認 Notion token 和連線。")
+    }
+
+    /// Unchecks This Week in Notion, then syncs so the list reorders.
+    func postpone(_ project: Project) {
+        run(["--postpone", project.pageID], failure: "延後失敗,Notion 沒有改動。請確認 Notion token 和連線。")
+    }
+
+    func run(_ arguments: [String], failure: String) {
         guard !isRefreshing else { return }
         isRefreshing = true
         error = nil
         Task.detached {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            process.arguments = ["-I", refreshScript] + (apiOnly ? ["--api-only"] : [])
+            process.arguments = ["-I", refreshScript] + arguments
             var env = ProcessInfo.processInfo.environment
             let home = NSHomeDirectory()
             let extra = ["\(home)/.local/bin", "\(home)/.claude/local", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
@@ -218,7 +227,7 @@ final class Store: ObservableObject {
             let ok = succeeded
             await MainActor.run {
                 self.isRefreshing = false
-                if ok { self.load() } else { self.error = "更新失敗,目前顯示舊資料。請確認 Notion token 和連線。" }
+                if ok { self.load() } else { self.error = failure }
             }
         }
     }
@@ -266,6 +275,7 @@ struct RowView: View {
     let index: Int?
     let project: Project
     let jump: Jump
+    var postpone: (() -> Void)? = nil
     let action: () -> Void
     @State private var isHovering = false
 
@@ -281,34 +291,40 @@ struct RowView: View {
     }
 
     var body: some View {
-        Button(action: action) {
-            HStack(alignment: .top, spacing: 10) {
-                Text(index.map(String.init) ?? "·").font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(.islandMuted).frame(width: 12)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(project.title).font(.system(size: 11)).foregroundColor(.islandMuted).lineLimit(1)
-                    Text(project.nextAction).font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.islandText).lineLimit(3).multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 8) {
-                        if let label = project.deadlineLabel(today: Date()) {
-                            Text(label.text).foregroundColor(label.isOverdue ? .islandMuted : .islandAccent)
-                        }
-                        if project.thisWeek { Text("本週").foregroundColor(.islandMuted) }
-                        Spacer(minLength: 0)
-                        openLabel
-                    }.font(.system(size: 11))
-                }
-                Spacer(minLength: 0)
+        // A tap gesture, not a Button, so the 延後 button inside wins its own clicks.
+        HStack(alignment: .top, spacing: 10) {
+            Text(index.map(String.init) ?? "·").font(.system(size: 12, design: .monospaced))
+                .foregroundColor(.islandMuted).frame(width: 12)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(project.title).font(.system(size: 11)).foregroundColor(.islandMuted).lineLimit(1)
+                Text(project.nextAction).font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.islandText).lineLimit(3).multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    if let label = project.deadlineLabel(today: Date()) {
+                        Text(label.text).foregroundColor(label.isOverdue ? .islandMuted : .islandAccent)
+                    }
+                    if project.thisWeek { Text("本週").foregroundColor(.islandMuted) }
+                    Spacer(minLength: 0)
+                    if let postpone, project.canPostpone {
+                        Button("延後", action: postpone).buttonStyle(.plain)
+                            .font(.system(size: 11)).foregroundColor(.islandMuted)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .overlay(Capsule().stroke(Color.islandBorder))
+                            .help("取消本週,讓它排到後面")
+                    }
+                    openLabel
+                }.font(.system(size: 11))
             }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isHovering ? Color.islandBorder : Color.islandCard)
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(isHovering ? Color.islandAccent : Color.islandBorder))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isHovering ? Color.islandBorder : Color.islandCard)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(isHovering ? Color.islandAccent : Color.islandBorder))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
         .onHover { inside in
             isHovering = inside
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
@@ -496,7 +512,8 @@ struct ExpandedView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         if view.actionable.isEmpty { Text("這裡目前沒有可動手的下一步。").foregroundColor(.islandMuted).font(.system(size: 13)) }
                         ForEach(Array(view.actionable.enumerated()), id: \.element.id) { i, project in
-                            RowView(index: i < 9 ? i + 1 : nil, project: project, jump: store.jump(for: project)) { store.open(project) }
+                            RowView(index: i < 9 ? i + 1 : nil, project: project, jump: store.jump(for: project),
+                                    postpone: { store.postpone(project) }) { store.open(project) }
                         }
                         if !view.waiting.isEmpty {
                             Text("等別人").font(.system(size: 11, weight: .semibold)).foregroundColor(.islandMuted).padding(.top, 6)

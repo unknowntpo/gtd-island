@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import sys
 import unittest
 import urllib.error
 from datetime import date
@@ -130,6 +131,51 @@ class ActionTests(unittest.TestCase):
             self.assertEqual(refresh.main(), 0)
             with open(os.path.join(tmp, "snapshot.json"), encoding="utf-8") as f:
                 self.assertEqual(json.load(f)["actions"], [{"Outcome": "a"}])
+
+
+class PostponeTests(unittest.TestCase):
+    PAGE = "0123456789abcdef0123456789abcdef"
+
+    def test_ac31_unchecks_this_week_through_the_api(self):
+        sent = []
+
+        def respond(request, timeout):
+            sent.append(request)
+            return FakeResponse({"object": "page"})
+
+        with mock.patch("urllib.request.urlopen", respond):
+            refresh.postpone("secret", self.PAGE)
+        request = sent[0]
+        self.assertEqual(request.get_method(), "PATCH")
+        self.assertEqual(request.full_url, "https://api.notion.com/v1/pages/" + self.PAGE)
+        self.assertEqual(json.loads(request.data), {"properties": {"This Week": {"checkbox": False}}})
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret")
+
+    def run_main(self, argv, token="secret", patch_error=None):
+        with mock.patch.object(sys, "argv", ["refresh.py"] + argv), \
+                mock.patch.object(refresh, "read_token", return_value=token), \
+                mock.patch.object(refresh, "postpone", side_effect=patch_error) as patch, \
+                mock.patch.object(refresh, "fetch_rows", return_value=None) as fetch, \
+                mock.patch("sys.stderr"):
+            return refresh.main(), patch, fetch
+
+    def test_ac32_bad_id_or_no_token_never_calls_the_api(self):
+        for argv, token in [(["--postpone", "abc"], "secret"), (["--postpone"], "secret"),
+                            (["--postpone", self.PAGE], None)]:
+            code, patch, fetch = self.run_main(argv, token)
+            self.assertNotEqual(code, 0)
+            patch.assert_not_called()
+            fetch.assert_not_called()
+
+    def test_ac32_api_failure_keeps_the_snapshot(self):
+        code, patch, fetch = self.run_main(["--postpone", self.PAGE], patch_error=urllib.error.URLError("boom"))
+        self.assertNotEqual(code, 0)
+        fetch.assert_not_called()
+
+    def test_ac31_success_then_syncs_without_claude(self):
+        code, patch, fetch = self.run_main(["--postpone", self.PAGE])
+        patch.assert_called_once_with("secret", self.PAGE)
+        fetch.assert_called_once_with(api_only=True)
 
 
 class FallbackTests(unittest.TestCase):

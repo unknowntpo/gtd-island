@@ -343,6 +343,11 @@ final class GTDTests: XCTestCase {
         XCTAssertEqual(Placement.anchor(for: pill), anchor)
     }
 
+    func testAC29FrameUsesWholePointsSoTheWindowServerKeepsIt() {
+        let frame = Placement.frame(size: panelSize, anchor: CGPoint(x: 700.4, y: 600.6), visible: visible)
+        XCTAssertEqual(frame.origin, CGPoint(x: frame.minX.rounded(), y: frame.minY.rounded()))
+    }
+
     func testAC29PanelIsPushedBackInsideTheVisibleArea() {
         let corner = CGPoint(x: 1430, y: 875)
         XCTAssertEqual(Placement.frame(size: panelSize, anchor: corner, visible: visible),
@@ -365,6 +370,14 @@ final class GTDTests: XCTestCase {
         XCTAssertNil(Placement.load(defaults, screens: [visible]))
         let external = CGRect(x: 1440, y: 0, width: 1920, height: 1080)
         XCTAssertEqual(Placement.load(defaults, screens: [visible, external]), CGPoint(x: 2000, y: 500))
+    }
+
+    func testAC31OnlyThisWeekRowsCanBePostponed() throws {
+        let week = row("w", extra: #","This Week":"__YES__""#).replacingOccurrences(of: #""This Week":"__NO__","#, with: "")
+        let rows = try decode([week, row("n")])
+        XCTAssertTrue(rows[0].canPostpone)
+        XCTAssertFalse(rows[1].canPostpone)
+        XCTAssertEqual(rows[0].pageID, "w")
     }
 
     func testAC6SnapshotStaleAfterFiveMinutes() throws {

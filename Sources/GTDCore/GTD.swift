@@ -64,7 +64,10 @@ public struct Project: Decodable, Equatable, Identifiable {
     public var isWaiting: Bool { nextAction.hasPrefix("等") || !waitingFor.isEmpty }
 
     /// The page id that `Parent Project` relations point to.
-    var pageID: String { url.split(separator: "/").last.map(String.init) ?? "" }
+    public var pageID: String { url.split(separator: "/").last.map(String.init) ?? "" }
+
+    /// 延後 unchecks This Week, so only a This Week row has anything to postpone.
+    public var canPostpone: Bool { thisWeek }
 }
 
 /// An open Action, read so a Project can jump to the session of its next Action.
@@ -379,7 +382,7 @@ public enum Placement {
 
     public static func frame(size: CGSize, anchor: CGPoint, visible: CGRect) -> CGRect {
         let x = min(max((anchor.x - size.width / 2).rounded(), visible.minX), visible.maxX - size.width)
-        let y = min(max(anchor.y - size.height, visible.minY), visible.maxY - size.height)
+        let y = min(max((anchor.y - size.height).rounded(), visible.minY), visible.maxY - size.height)
         return CGRect(x: x, y: y, width: size.width, height: size.height)
     }
 

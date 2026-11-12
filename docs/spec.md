@@ -9,7 +9,7 @@
 使用者按 `1`,面板收起,並打開該 Project 的 session 或 Notion 頁面。
 
 ## Scope
-- 資料來源:Notion 的 `Projects 下一步` view。POC 只讀,不寫 GTD。
+- 資料來源:Notion 的 `Projects 下一步` view。面板對 GTD 的寫入只有 AC31 的「延後」。
 - 不做:agent 通信、卡點欄位、批准工具呼叫、拆小 Action。
 
 ## Acceptance
@@ -26,6 +26,9 @@
 - AC29 位置以膠囊上緣的中點為準:面板展開時,上緣中點對齊這一點,再往下長。面板超出這一點所在螢幕的可見範圍時,往內推到剛好留在範圍內。
 - AC30 沒存過位置,或存的點不在任何螢幕上時,用預設位置:主螢幕可見範圍上緣置中、往下 4 點。
   Example:使用者把膠囊拖到螢幕右上角,讓開 Chrome 的網址列。滑鼠移上去,面板向下展開,右緣貼齊螢幕右緣,不會超出。重開 app 後,膠囊還在右上角。外接螢幕拔掉後,膠囊回到主螢幕上緣中央。
+- AC31 有「本週」標記的列多一個「延後」按鈕。按下後,面板執行 `refresh.py --postpone <頁面 id>`:它透過 Notion API 把該 Project 的 `This Week` 改成未勾選,再照 AC22 同步快照。成功後該列依 AC1 重新排序;失敗時快照不變,面板顯示錯誤。按「延後」不會打開該列。
+- AC32 `--postpone` 只走 Notion API。沒有 token、頁面 id 不是 32 位十六進位、或 API 失敗時,`refresh.py` 不改快照,結束碼不是 0。
+  Example:「先看這 3 件」第 2 件是「整理閱讀筆記」,有「本週」標記。使用者按它的「延後」。Notion 上它的 `This Week` 變成未勾選,幾秒後清單重排,原本第 4 件補上第 2 件。
 - AC9 macOS Keychain 有 `gtd-island-notion` token 時,`refresh.py` 直接呼叫 Notion API 查 GTD Items:`Item Type` 是 Project 且 `GTD Status` 是 Active,依 `Last Worked` 新到舊,讀完所有分頁。輸出的欄位名稱和格式與原本的 view 資料相同。
 - AC10 沒有 token 或 API 失敗時,`refresh.py` 改走原本的 `claude` 路徑。token 不寫進檔案或輸出。
 - AC27 有 token 時,`refresh.py` 另外查開著的 Action(`Item Type` 是 Action,`GTD Status` 不是 Done 也不是 Dropped),寫進快照的 `actions`。每筆含標題、頁面、`Owner Session`、`GTD Status` 和 `Parent Project` 的頁面 id。這個查詢失敗時 `actions` 是 null,Project 列照常更新,跳轉只用 AC5 的 (1) 和 (4)。

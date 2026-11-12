@@ -4,6 +4,7 @@
 Calls the Notion API directly when Keychain has a token, otherwise goes through Claude Code.
 """
 import json
+import re
 import os
 import subprocess
 import sys
@@ -204,16 +205,56 @@ def fetch_rows(api_only=False):
     return None if api_only else query_claude()
 
 
+PAGE_URL = "https://api.notion.com/v1/pages/{}"
+
+
+def postpone(token, page_id):
+    """Uncheck `This Week`, the panel's only write to GTD."""
+    request = urllib.request.Request(PAGE_URL.format(page_id), method="PATCH",
+        data=json.dumps({"properties": {"This Week": {"checkbox": False}}}).encode(), headers={
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": API_VERSION,
+            "Content-Type": "application/json",
+        })
+    with urllib.request.urlopen(request, timeout=20) as response:
+        response.read()
+
+
+def run_postpone(args):
+    """Return None on success, else the exit code. A failure leaves the snapshot alone."""
+    i = args.index("--postpone")
+    page_id = args[i + 1] if i + 1 < len(args) else ""
+    if not re.fullmatch(r"[0-9a-f]{32}", page_id):
+        sys.stderr.write("--postpone needs a 32-character page id\n")
+        return 2
+    token = read_token()
+    if not token:
+        sys.stderr.write("--postpone needs the Notion token in Keychain\n")
+        return 1
+    try:
+        postpone(token, page_id)
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        sys.stderr.write(f"Notion update failed ({error})\n")
+        return 1
+    return None
+
+
 def main():
     if not DATA_SOURCE:
         sys.stderr.write(f"missing dataSource in {CONFIG_PATH}\n")
         return 1
-    rows = fetch_rows(api_only="--api-only" in sys.argv[1:])
+    args = sys.argv[1:]
+    if "--postpone" in args:
+        code = run_postpone(args)
+        if code is not None:
+            return code
+    rows = fetch_rows(api_only="--api-only" in args or "--postpone" in args)
     if not rows:
         sys.stderr.write("no Notion rows found; snapshot unchanged\n")
         return 1
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    tmp = OUT + ".tmp"
+    # Each process gets its own temp file, so two syncs at once never rename the same file.
+    tmp = f"{OUT}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"fetchedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"), "rows": rows,
                    "timeLog": fetch_time_log(), "actions": fetch_actions()},

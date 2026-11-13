@@ -41,6 +41,8 @@ Status: proof of concept. The UI is in Traditional Chinese.
    scripts/install.sh
    ```
 
+`install.sh` also adds `scripts/attention.py` as a Claude Code hook in `~/.claude/settings.json`, after saving a backup as `settings.json.bak-gtd-island`. The hook records which sessions are waiting for you in `~/.gtd-island/attention/`, and the 等你 tab lists them. The hook uses only the Python standard library.
+
 The session finder also needs an ONNX export of `multilingual-e5-small` in `~/.gtd-island/models/multilingual-e5-small/`. The other tabs work without it.
 
 ## Tests
@@ -50,7 +52,7 @@ swift test
 ```
 
 ```bash
-cd scripts && python3 -m unittest test_refresh test_route
+cd scripts && python3 -m unittest test_refresh test_route test_attention
 ```
 
 The expected Notion properties and panel behavior are in [docs/spec.md](docs/spec.md).

@@ -65,7 +65,21 @@ Example:使用者打開「動態」分頁,面板立刻同步。使用者留在�
 ### 分頁設定檔(2026-11-05)
 目的:分頁屬於使用者的 GTD 分類,不屬於程式碼。公開程式碼時不會公開使用者的工作分類,別人也能用自己的分類。
 Example:`config.json` 有 `"tabs": [{"name": "工作", "areas": ["Client Work"]}, {"name": "閱讀", "areas": ["Reading"], "titlePrefixes": ["讀書會"], "linkContains": ["reading-notes"]}]`。面板的分頁列是「先看這 3 件、動態、工作、閱讀、其他、找 session」。Area 是 `Client Work`、標題以 `讀書會` 開頭的 Project 顯示在「閱讀」。
-- AC23 每個分頁有 `name`,以及可省略的 `areas`、`titlePrefixes`、`linkContains`。分頁列依序是:先看這 3 件、動態、設定檔的分頁(依檔案順序)、其他、找 session。
+- AC23 每個分頁有 `name`,以及可省略的 `areas`、`titlePrefixes`、`linkContains`。分頁列依序是:先看這 3 件、等你(AC36)、動態、設定檔的分頁(依檔案順序)、其他、找 session。
 - AC24 Project 的分頁依序決定:任一分頁的 `titlePrefixes` 符合標題,或 `linkContains` 符合 `Worktree`、`Source URL`;再來是 `areas` 符合 Area;都不符合就是「其他」。同一步有多個分頁符合時,取檔案中較前面的分頁。
 - AC25 檔案不存在、無法解析或沒有 `tabs` 時,只顯示固定分頁,所有 Project 在「其他」。`name` 是空字串、與固定分頁同名或與前面分頁同名的分頁會被忽略。
 - AC26 面板只在啟動時讀設定檔。改設定檔後要重開面板。
+
+### 等你的 session 和瀏海外觀(2026-11-13)
+目的:使用者不用逐個翻 session,就知道哪些 session 在等自己。面板改成貼在螢幕上緣的瀏海,不擋瀏覽器的網址列。這是取代 CodeIsland 的第一階段;在瀏海裡核准權限和回答選項不在這一階段。
+Example:使用者同時開 3 個 session。「發布 1.0」問了一個選項題,「整理測試」做完一輪。瀏海左邊顯示「2 等你」。使用者打開「等你」分頁,第 1 列是「發布 1.0 · 有問題要你回答」,第 2 列是「整理測試 · 做完了」。使用者按 `1`,桌面 app 跳到「發布 1.0」。使用者回答後,這一列消失,瀏海顯示「1 等你」。
+- AC33 `attention.py` 是 Claude Code 的 hook。它從 stdin 讀一個 hook 事件,寫入或刪除 `~/.gtd-island/attention/<session_id>.json`。檔案內容有 `sessionId`、`cwd`、`state`、`message`、`at`(UTC ISO 8601,精確到毫秒)。
+- AC34 事件對應:`PreToolUse` 的工具是 `AskUserQuestion` 時,寫入 `state = "needsYou"`,`message` 是第一個問題。`Notification` 寫入 `needsYou`,`message` 是通知文字;但閒置提醒(`notification_type` 是 `idle_prompt`)在已有紀錄時不改紀錄。`Stop` 寫入 `state = "done"`。`UserPromptSubmit` 和 `SessionEnd` 刪除檔案。`PostToolUse` 在紀錄是 `needsYou` 時刪除檔案,因為工具已經執行,代表使用者已經回應。已知限制:同時執行多個工具時,另一個工具先完成也會刪掉紀錄。
+- AC35 `attention.py` 只用 Python 標準函式庫,不依賴 macOS。它永遠以結束碼 0 結束,不輸出任何文字,所以不會擋住或改變 session。無法解析的輸入、沒有 `session_id`、或 `session_id` 含有英數字和 `-`、`_` 以外的字元時,它什麼都不做。
+- AC36 面板的分頁列在「先看這 3 件」後面加上固定分頁「等你」。「等你」列出 attention 資料夾的紀錄:`needsYou` 在前,`done` 在後,同一種依 `at` 新到舊。每列顯示 session 標題、原因(有 `message` 時顯示它;否則 `needsYou` 顯示「等你回覆」,`done` 顯示「做完了」)、資料夾名稱、距今多久。
+- AC37 標題和跳轉來自桌面 app 的 session 紀錄:`cliSessionId` 等於 `sessionId` 的那一筆。有這筆時,標題是它的 `title`,點擊或按數字鍵打開 `claude://claude.ai/epitaxy/<它的 sessionId>`。沒有這筆時(終端機的 session),標題是 `cwd` 的資料夾名稱,列上顯示「在終端機」,不能跳轉。
+- AC38 以下紀錄不列出:`at` 超過 7 天;桌面 app 紀錄已封存;桌面 app 紀錄的 `lastFocusedAt` 晚於 `at`(使用者已經看過)。
+- AC39 收起時,面板貼齊螢幕上緣,畫成黑色、上緣平直、下方圓角的瀏海。有瀏海的螢幕上,內容放在瀏海兩側,不放在瀏海底下。左側顯示「N 等你」(N 是 AC36 的列數,0 時不顯示),右側顯示第一個下一步。面板每 3 秒重讀 attention 資料夾。
+- AC40 這一節取代 AC29、AC30 的「可見範圍」:範圍改成可見範圍往上延伸到螢幕上緣(含選單列)。預設位置是主螢幕上緣置中,不留空隙。拖曳和儲存位置照 AC28。
+- AC42 滑鼠離開展開的面板 0.4 秒後,面板收起;0.4 秒內移回來就不收。用鍵盤打開、滑鼠還沒進過面板時不收。按著滑鼠(拖曳中)或在「找 session」分頁時不收。
+- AC41 `scripts/install.sh` 把 `attention.py` 複製到 `~/.gtd-island/`,並把 AC34 的事件加進 `~/.claude/settings.json`。已經存在的同一個指令不重複加入;其他 hooks 不變;寫入前先備份原檔。

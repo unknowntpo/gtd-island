@@ -8,6 +8,8 @@ let tabConfig = TabConfig.load(path: NSString(string: "~/.gtd-island/config.json
 let refreshScript = NSString(string: "~/.gtd-island/refresh.py").expandingTildeInPath
 let routeScript = NSString(string: "~/.gtd-island/route.py").expandingTildeInPath
 let routePython = NSString(string: "~/.gtd-island/venv/bin/python").expandingTildeInPath
+let attentionFolder = NSString(string: "~/.gtd-island/attention").expandingTildeInPath
+let desktopSessionsRoot = NSString(string: "~/Library/Application Support/Claude/claude-code-sessions").expandingTildeInPath
 
 /// The long-lived `route.py` helper. It holds the model in memory, so it runs only while the tab is in use.
 final class RouteProcess {
@@ -80,6 +82,13 @@ final class Store: ObservableObject {
     @Published var routeError: String?
     /// Set only by the Option+J path, so the text field never takes focus on hover or click.
     @Published var wantsFieldFocus = false
+    @Published var attention: [AttentionItem] = []
+    /// How the collapsed panel is drawn; set by AppDelegate from where the panel sits.
+    @Published var notch = NotchLayout(atTop: false, gap: 0, menuBar: 24)
+    private var desktopIndex: [String: String] = [:]
+    private var unknownIDs: Set<String> = []
+    private var indexedAt = Date.distantPast
+    private var attentionTimer: Timer?
     var collapse: () -> Void = {}
     private var route: RouteProcess?
     private var routeGeneration = 0
@@ -232,6 +241,41 @@ final class Store: ObservableObject {
         }
     }
 
+    /// Rereads the attention folder every 3 seconds (AC39).
+    func startAttention() {
+        reloadAttention()
+        attentionTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reloadAttention() }
+        }
+    }
+
+    func reloadAttention() {
+        let records = AttentionRecord.load(folder: attentionFolder)
+        // Rebuild the id index only when a session it has not seen appears, since it reads every session file.
+        let unknown = Set(records.map(\.sessionId)).subtracting(desktopIndex.keys)
+        // A new desktop session may get its CLI id after its first record, so also rebuild once a minute.
+        if !unknown.isEmpty, unknown != unknownIDs || Date().timeIntervalSince(indexedAt) > 60 {
+            indexedAt = Date()
+            desktopIndex = DesktopSession.index(root: desktopSessionsRoot)
+            unknownIDs = unknown
+        }
+        var desktop: [String: DesktopSession] = [:]
+        for record in records {
+            if let path = desktopIndex[record.sessionId],
+               let session = FileManager.default.contents(atPath: path).flatMap(DesktopSession.decode) {
+                desktop[record.sessionId] = session
+            }
+        }
+        let items = Attention.items(records, desktop: desktop, now: Date())
+        if items != attention { attention = items }
+    }
+
+    func open(_ item: AttentionItem) {
+        guard let target = item.target else { return }
+        NSWorkspace.shared.open(target)
+        collapse()
+    }
+
     func jump(for project: Project) -> Jump {
         snapshot?.jump(for: project) ?? Jump.resolve(project, actions: [])
     }
@@ -243,24 +287,68 @@ final class Store: ObservableObject {
 
     /// Number keys follow what the list shows: 1 is the first actionable row.
     func open(number: Int) {
+        if tab == .waiting {
+            if number >= 1, number <= attention.count { open(attention[number - 1]) }
+            return
+        }
         let rows = visible.actionable
         if number >= 1, number <= rows.count { open(rows[number - 1]) }
     }
 }
 
+/// Where the collapsed panel sits: against the screen's top edge, and how wide the camera notch is there.
+struct NotchLayout: Equatable {
+    var atTop: Bool
+    var gap: CGFloat
+    var menuBar: CGFloat = 24
+}
+
+/// Flat top and round bottom corners when the panel hangs from the top edge; a capsule elsewhere (AC39).
+struct IslandShape: Shape {
+    let atTop: Bool
+    let radius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        if atTop {
+            return UnevenRoundedRectangle(bottomLeadingRadius: radius, bottomTrailingRadius: radius).path(in: rect)
+        }
+        return RoundedRectangle(cornerRadius: min(radius, rect.height / 2)).path(in: rect)
+    }
+}
+
 struct PillView: View {
     @ObservedObject var store: Store
+
+    var waiting: some View {
+        HStack(spacing: 5) {
+            Circle().fill(store.attention.isEmpty ? Color.islandAccent : Color.orange).frame(width: 7, height: 7)
+            if !store.attention.isEmpty {
+                Text("\(store.attention.count) 等你").font(.system(size: 12, weight: .semibold)).foregroundColor(.islandText)
+            }
+        }
+    }
+
+    var next: some View {
+        Text(store.visibleTop).lineLimit(1).font(.system(size: 12, weight: .medium)).foregroundColor(.islandText)
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            Circle().fill(Color.islandAccent).frame(width: 7, height: 7)
-            Text(store.visibleTop).lineLimit(1).font(.system(size: 12, weight: .medium))
-                .foregroundColor(.islandText)
+            if store.notch.gap > 0 {
+                // Nothing goes under the camera: the count sits left of it, the next step right of it.
+                waiting.frame(maxWidth: .infinity, alignment: .trailing)
+                Spacer().frame(width: store.notch.gap)
+                next.frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                waiting
+                next
+            }
         }
         .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
-        .clipShape(Capsule())
-        .contentShape(Capsule())
+        .clipShape(IslandShape(atTop: store.notch.atTop, radius: store.notch.atTop ? 10 : 15))
+        .contentShape(Rectangle())
     }
 }
 
@@ -468,6 +556,61 @@ struct FindView: View {
     }
 }
 
+struct AttentionRow: View {
+    let index: Int
+    let item: AttentionItem
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(index <= 9 ? String(index) : "·").font(.system(size: 12, design: .monospaced))
+                .foregroundColor(.islandMuted).frame(width: 12)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title).font(.system(size: 13, weight: .semibold)).foregroundColor(.islandText)
+                    .lineLimit(2).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+                Text(item.reason).font(.system(size: 12))
+                    .foregroundColor(item.needsYou ? .orange : .islandMuted).lineLimit(2)
+                HStack(spacing: 8) {
+                    Text(Attention.age(item.at, now: Date()))
+                    if !item.folder.isEmpty { Text(item.folder).lineLimit(1) }
+                    Spacer(minLength: 0)
+                    if item.target == nil {
+                        Text("在終端機")
+                    } else {
+                        Text("打開 session ↗").font(.system(size: 11, weight: .semibold)).foregroundColor(.islandAccent)
+                    }
+                }.font(.system(size: 11)).foregroundColor(.islandMuted)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isHovering && item.target != nil ? Color.islandBorder : Color.islandCard)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(isHovering && item.target != nil ? Color.islandAccent : Color.islandBorder))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
+        .onHover { isHovering = $0 }
+    }
+}
+
+struct AttentionView: View {
+    @ObservedObject var store: Store
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                if store.attention.isEmpty {
+                    Text("目前沒有 session 在等你。").foregroundColor(.islandMuted).font(.system(size: 13))
+                }
+                ForEach(Array(store.attention.enumerated()), id: \.element.id) { i, item in
+                    AttentionRow(index: i + 1, item: item) { store.open(item) }
+                }
+            }
+        }
+    }
+}
+
 struct ExpandedView: View {
     @ObservedObject var store: Store
 
@@ -489,10 +632,11 @@ struct ExpandedView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 4) {
                 ForEach(tabConfig.tabs) { tab in
-                    Button(tab.name) { store.tab = tab }
+                    Button(tab == .waiting && !store.attention.isEmpty ? "等你 \(store.attention.count)" : tab.name) { store.tab = tab }
                         .buttonStyle(.plain).font(.system(size: 12, weight: store.tab == tab ? .semibold : .regular))
                         .foregroundColor(store.tab == tab ? .islandAccent : .islandMuted)
-                        .padding(.horizontal, 6).padding(.vertical, 4)
+                        .lineLimit(1).fixedSize()
+                        .padding(.horizontal, 5).padding(.vertical, 4)
                 }
                 Spacer()
                 Image(systemName: "line.3.horizontal").font(.system(size: 11)).foregroundColor(.islandMuted)
@@ -505,6 +649,8 @@ struct ExpandedView: View {
             }
             if store.tab == .find {
                 FindView(store: store)
+            } else if store.tab == .waiting {
+                AttentionView(store: store)
             } else if store.tab == .activity {
                 ActivityChart(store: store)
             } else {
@@ -541,8 +687,9 @@ struct ExpandedView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.islandBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .padding(.top, store.notch.atTop ? store.notch.menuBar : 0)
+        .background(store.notch.atTop ? Color.black : Color.islandBackground)
+        .clipShape(IslandShape(atTop: store.notch.atTop, radius: 14))
     }
 }
 
@@ -580,12 +727,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hotKey: EventHotKeyRef?
     var findHotKey: EventHotKeyRef?
     var hoverOpen: DispatchWorkItem?
+    /// Watches the mouse while the panel is open, to close it after the mouse leaves (AC42).
+    var leaveWatch: Timer?
+    var mouseWasInside = false
+    var mouseLeftAt: Date?
     /// The top center of the pill, chosen by dragging; nil means the default place.
     var anchor: CGPoint?
     var dragOffset: CGPoint?
     static var shared: AppDelegate!
-    let pillSize = NSSize(width: 340, height: 30)
-    let expandedSize = NSSize(width: 480, height: 560)
+    var pillSize: NSSize {
+        guard store.notch.atTop else { return NSSize(width: 340, height: 30) }
+        return NSSize(width: store.notch.gap > 0 ? store.notch.gap + 300 : 340, height: store.notch.menuBar)
+    }
+    let expandedSize = NSSize(width: 560, height: 560)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -607,14 +761,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         host.sizingOptions = []
         panel.contentView = host
         anchor = Placement.load(.standard, screens: NSScreen.screens.map(\.frame))
-        panel.setFrame(frame(for: pillSize), display: true)
+        panel.setFrame(targetFrame, display: true)
         panel.orderFrontRegardless()
+        store.startAttention()
         store.load()
         store.refreshIfStale()
         registerHotKey()
 
         if CommandLine.arguments.contains("--selftest") { runSelfTest(); return }
         if CommandLine.arguments.contains("--selftest-drag") { runDragSelfTest(); return }
+        if CommandLine.arguments.contains("--selftest-leave") { runLeaveSelfTest(); return }
         if let flag = CommandLine.arguments.firstIndex(of: "--selftest-find"), flag + 1 < CommandLine.arguments.count {
             runFindSelfTest(query: CommandLine.arguments[flag + 1]); return
         }
@@ -649,7 +805,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             let want = self.frame(for: self.expandedSize)
-            let screen = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+            let screen = self.placement().area
             let ok = self.store.isExpanded && self.panel.frame == want && screen.contains(want)
             print(ok ? "PASS" : "FAIL", "frame", self.panel.frame, "want", want)
             exit(ok ? 0 : 1)
@@ -659,7 +815,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Drags the pill to the top-right corner with simulated mouse points, then checks
     /// the expanded panel stays on screen and the point is saved. Leaves no saved point behind.
     func runDragSelfTest() {
-        let visible = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        let main = NSScreen.screens[0]
+        let visible = Placement.area(visible: main.visibleFrame, screen: main.frame)
         let start = CGPoint(x: panel.frame.midX, y: panel.frame.midY)
         dragMoved(to: start)
         dragMoved(to: CGPoint(x: start.x + 2000, y: start.y + 500))
@@ -671,8 +828,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setExpanded(false)
         let ok = pill.maxX == visible.maxX && pill.maxY == visible.maxY && saved == Placement.anchor(for: pill)
             && visible.contains(expanded) && expanded.maxY == pill.maxY && expanded.maxX == visible.maxX
-        print(ok ? "PASS" : "FAIL", "pill", pill, "expanded", expanded, "saved", saved as Any, "visible", visible)
+        print(ok ? "PASS" : "FAIL", "notch", store.notch, "pill", pill, "expanded", expanded, "saved", saved as Any, "visible", visible)
         UserDefaults.standard.removeObject(forKey: "panelAnchor")
+        exit(ok ? 0 : 1)
+    }
+
+    /// Feeds simulated mouse points to the AC42 check.
+    func runLeaveSelfTest() {
+        setExpanded(true)
+        leaveWatch?.invalidate()
+        let t = Date()
+        let inside = CGPoint(x: panel.frame.midX, y: panel.frame.midY)
+        let outside = CGPoint(x: panel.frame.maxX + 100, y: panel.frame.midY)
+        mouseWasInside = false
+        checkMouseLeft(mouse: outside, pressed: false, now: t.addingTimeInterval(5))
+        let keyboardOpenStays = store.isExpanded
+        checkMouseLeft(mouse: inside, pressed: false, now: t)
+        checkMouseLeft(mouse: outside, pressed: false, now: t.addingTimeInterval(0.1))
+        checkMouseLeft(mouse: outside, pressed: false, now: t.addingTimeInterval(0.3))
+        checkMouseLeft(mouse: inside, pressed: false, now: t.addingTimeInterval(0.35))
+        checkMouseLeft(mouse: outside, pressed: false, now: t.addingTimeInterval(0.4))
+        let backInTimeStays = store.isExpanded
+        checkMouseLeft(mouse: outside, pressed: true, now: t.addingTimeInterval(2))
+        let dragStays = store.isExpanded
+        checkMouseLeft(mouse: outside, pressed: false, now: t.addingTimeInterval(2.1))
+        checkMouseLeft(mouse: outside, pressed: false, now: t.addingTimeInterval(2.6))
+        let closed = !store.isExpanded
+        let ok = keyboardOpenStays && backInTimeStays && dragStays && closed
+        print(ok ? "PASS" : "FAIL", "keyboard", keyboardOpenStays, "back in time", backInTimeStays, "drag", dragStays, "closed", closed)
         exit(ok ? 0 : 1)
     }
 
@@ -703,11 +886,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.waitForMatches(deadline: deadline, started: started, ok: ok) }
     }
 
-    func frame(for size: NSSize) -> NSRect {
+    /// The screen that holds the anchor, the area the panel may use there (AC40), and the point itself.
+    /// On the top edge near a camera notch, the point snaps to the notch's center (AC39).
+    func placement() -> (screen: NSScreen, area: CGRect, point: CGPoint, notch: NotchLayout) {
         let held = anchor.flatMap { point in NSScreen.screens.first { $0.frame.insetBy(dx: -1, dy: -1).contains(point) } }
-        let visible = (held ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
-        let point = held == nil ? Placement.defaultAnchor(visible) : anchor!
-        return Placement.frame(size: size, anchor: point, visible: visible)
+        let screen = held ?? NSScreen.screens[0]
+        let area = Placement.area(visible: screen.visibleFrame, screen: screen.frame)
+        var point = held == nil ? Placement.defaultAnchor(area) : anchor!
+        let atTop = point.y >= area.maxY - 0.5
+        var gap: CGFloat = 0
+        if atTop, let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+            let width = screen.frame.width - left.width - right.width
+            if width > 0, abs(point.x - screen.frame.midX) < width / 2 + 150 {
+                gap = width
+                point.x = screen.frame.midX
+            }
+        }
+        let menuBar = max(screen.frame.maxY - screen.visibleFrame.maxY, 24)
+        return (screen, area, point, NotchLayout(atTop: atTop, gap: gap, menuBar: menuBar))
+    }
+
+    func frame(for size: NSSize) -> NSRect {
+        let place = placement()
+        return Placement.frame(size: size, anchor: place.point, visible: place.area)
     }
 
     func dragMoved(to mouse: CGPoint = NSEvent.mouseLocation) {
@@ -720,8 +921,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let origin = CGPoint(x: mouse.x - offset.x, y: mouse.y - offset.y)
         // Keep the point on the screen under the mouse; a point off every screen means "default".
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]
+        let area = Placement.area(visible: screen.visibleFrame, screen: screen.frame)
         let raw = Placement.anchor(for: CGRect(origin: origin, size: panel.frame.size))
-        anchor = Placement.anchor(for: Placement.frame(size: panel.frame.size, anchor: raw, visible: screen.visibleFrame))
+        anchor = Placement.anchor(for: Placement.frame(size: panel.frame.size, anchor: raw, visible: area))
         panel.setFrame(targetFrame, display: true)
     }
 
@@ -732,7 +934,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Placement.save(point, .standard)
     }
 
-    var targetFrame: NSRect { frame(for: store.isExpanded ? expandedSize : pillSize) }
+    var targetFrame: NSRect {
+        let notch = placement().notch
+        if store.notch != notch { store.notch = notch }
+        return frame(for: store.isExpanded ? expandedSize : pillSize)
+    }
 
     func windowDidResize(_ notification: Notification) { keepFrame() }
     func windowDidMove(_ notification: Notification) { keepFrame() }
@@ -764,12 +970,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             store.load()
             store.refreshIfStale()
             panel.makeKeyAndOrderFront(nil)
+            startLeaveWatch()
         } else {
+            leaveWatch?.invalidate()
+            leaveWatch = nil
             store.tab = .now
             // Leaving the screen gives up key status, so typing returns to the previous app.
             panel.orderOut(nil)
             panel.orderFrontRegardless()
         }
+    }
+
+    /// Closes the panel 0.4 s after the mouse leaves it. A panel opened by keyboard waits until the
+    /// mouse has been inside once; a pressed button (a drag) and the 找 session tab never close it.
+    func startLeaveWatch() {
+        leaveWatch?.invalidate()
+        mouseWasInside = panel.frame.contains(NSEvent.mouseLocation)
+        mouseLeftAt = nil
+        leaveWatch = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkMouseLeft() }
+        }
+    }
+
+    func checkMouseLeft(mouse: CGPoint = NSEvent.mouseLocation, pressed: Bool = NSEvent.pressedMouseButtons != 0, now: Date = Date()) {
+        let inside = panel.frame.insetBy(dx: -8, dy: -8).contains(mouse)
+        if inside || pressed || store.tab == .find {
+            mouseWasInside = mouseWasInside || inside
+            mouseLeftAt = nil
+            return
+        }
+        guard mouseWasInside else { return }
+        let left = mouseLeftAt ?? now
+        mouseLeftAt = left
+        if now.timeIntervalSince(left) >= 0.4 { setExpanded(false) }
     }
 
     func showFind() {
@@ -848,21 +1081,30 @@ if let flag = CommandLine.arguments.firstIndex(of: "--render"), flag + 1 < Comma
             FileManager.default.createFile(atPath: "\(dir)/\(name).png", contents: rep.representation(using: .png, properties: [:]))
         }
         save("pill", PillView(store: store), NSSize(width: 340, height: 30))
-        save("now", ExpandedView(store: store), NSSize(width: 480, height: 560))
+        store.reloadAttention()
+        save("pill-waiting", PillView(store: store), NSSize(width: 340, height: 30))
+        store.notch = NotchLayout(atTop: true, gap: 185, menuBar: 37)
+        save("pill-notch", PillView(store: store), NSSize(width: 485, height: 37))
+        store.tab = .waiting
+        save("waiting-notch", ExpandedView(store: store), NSSize(width: 560, height: 560))
+        store.notch = NotchLayout(atTop: false, gap: 0, menuBar: 24)
+        save("waiting", ExpandedView(store: store), NSSize(width: 560, height: 560))
+        store.tab = .now
+        save("now", ExpandedView(store: store), NSSize(width: 560, height: 560))
         store.tab = tabConfig.thirdSlotChoices[0]
-        save("first-tab", ExpandedView(store: store), NSSize(width: 480, height: 560))
+        save("first-tab", ExpandedView(store: store), NSSize(width: 560, height: 560))
         store.tab = .activity
-        save("activity", ExpandedView(store: store), NSSize(width: 480, height: 560))
+        save("activity", ExpandedView(store: store), NSSize(width: 560, height: 560))
         store.hoveredArea = Activity.bars(store.snapshot?.timeLog ?? [], today: Date()).first?.label
-        save("activity-hover", ExpandedView(store: store), NSSize(width: 480, height: 560))
+        save("activity-hover", ExpandedView(store: store), NSSize(width: 560, height: 560))
         store.tab = .find
-        save("find-empty", ExpandedView(store: store), NSSize(width: 480, height: 560))
+        save("find-empty", ExpandedView(store: store), NSSize(width: 560, height: 560))
         store.query = "上週修到一半的登入錯誤"
         store.matches = [
             SessionMatch(id: "1", title: "修登入錯誤(接手)", cwd: "/repo/app"),
             SessionMatch(id: "2", title: "登入流程重構", cwd: "/repo/app"),
         ]
-        save("find-matches", ExpandedView(store: store), NSSize(width: 480, height: 560))
+        save("find-matches", ExpandedView(store: store), NSSize(width: 560, height: 560))
     }
     exit(0)
 }

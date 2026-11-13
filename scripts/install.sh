@@ -9,6 +9,8 @@ mkdir -p "$APP/Contents/MacOS" "$HOME/.gtd-island"
 cp .build/release/GTDIsland "$APP/Contents/MacOS/GTDIsland"
 cp scripts/refresh.py "$HOME/.gtd-island/refresh.py"
 cp scripts/route.py "$HOME/.gtd-island/route.py"
+cp scripts/attention.py "$HOME/.gtd-island/attention.py"
+python3 -I scripts/attention.py --install-hooks
 VENV="$HOME/.gtd-island/venv"
 [ -x "$VENV/bin/python" ] || uv venv --quiet --python 3.12 "$VENV"
 uv pip install --quiet --python "$VENV/bin/python" onnxruntime tokenizers numpy

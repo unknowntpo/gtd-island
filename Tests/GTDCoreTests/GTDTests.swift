@@ -94,7 +94,7 @@ final class GTDTests: XCTestCase {
     }
 
     func testAC23TabBarKeepsFixedTabsAroundConfiguredOnes() {
-        XCTAssertEqual(config.tabs.map(\.name), ["先看這 3 件", "動態", "工作", "閱讀", "Side", "其他", "找 session"])
+        XCTAssertEqual(config.tabs.map(\.name), ["先看這 3 件", "等你", "動態", "工作", "閱讀", "Side", "其他", "找 session"])
     }
 
     func testAC24TitleOrLinkWinsOverAreaAndEarlierTabWins() throws {
@@ -120,7 +120,7 @@ final class GTDTests: XCTestCase {
         XCTAssertEqual(TabConfig.load(path: path.path), .empty)
         try Data(#"{"dataSource":"x"}"#.utf8).write(to: path)
         let noTabs = TabConfig.load(path: path.path)
-        XCTAssertEqual(noTabs.tabs, [.now, .activity, .other, .find])
+        XCTAssertEqual(noTabs.tabs, [.now, .waiting, .activity, .other, .find])
         XCTAssertEqual(noTabs.tab(for: try decode([row("a", area: "Reading")])[0]), .other)
     }
 
@@ -328,10 +328,13 @@ final class GTDTests: XCTestCase {
     let pillSize = CGSize(width: 340, height: 30)
     let panelSize = CGSize(width: 480, height: 560)
 
-    func testAC30DefaultIsTopCenterFourPointsDown() {
-        let anchor = Placement.defaultAnchor(visible)
-        XCTAssertEqual(Placement.frame(size: pillSize, anchor: anchor, visible: visible),
-                       CGRect(x: 550, y: 875 - 30 - 4, width: 340, height: 30))
+    func testAC40DefaultIsTheScreenTopCenterOverTheMenuBar() {
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let area = Placement.area(visible: visible, screen: screen)
+        XCTAssertEqual(area, CGRect(x: 0, y: 0, width: 1440, height: 900))
+        let anchor = Placement.defaultAnchor(area)
+        XCTAssertEqual(Placement.frame(size: pillSize, anchor: anchor, visible: area),
+                       CGRect(x: 550, y: 900 - 30, width: 340, height: 30))
     }
 
     func testAC29PanelGrowsDownFromTheSameTopCenter() {
@@ -406,5 +409,85 @@ final class GTDTests: XCTestCase {
         XCTAssertEqual(labels[2]?.text, "已過 10-13")
         XCTAssertEqual(labels[2]?.isOverdue, true)
         XCTAssertNil(labels[3])
+    }
+
+    // MARK: 等你 (AC36-AC38)
+
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    func record(_ id: String, _ state: String, minutesAgo: Double, message: String = "", cwd: String = "/repo/demo") -> AttentionRecord {
+        AttentionRecord(sessionId: id, cwd: cwd, state: state, message: message, at: now.addingTimeInterval(-minutesAgo * 60))
+    }
+
+    func testAC33RecordDecodesHookOutput() throws {
+        let json = #"{"sessionId":"s1","cwd":"/repo/demo","state":"needsYou","message":"要用哪個方案?","at":"2026-11-13T01:00:00Z"}"#
+        let r = try XCTUnwrap(AttentionRecord.decode(Data(json.utf8)))
+        XCTAssertEqual(r.sessionId, "s1")
+        XCTAssertTrue(r.needsYou)
+        XCTAssertEqual(r.at, ISO8601DateFormatter().date(from: "2026-11-13T01:00:00Z"))
+        XCTAssertNil(AttentionRecord.decode(Data("{}".utf8)))
+        let ms = #"{"sessionId":"s1","cwd":"","state":"done","message":"","at":"2026-11-13T01:00:00.250Z"}"#
+        XCTAssertEqual(AttentionRecord.decode(Data(ms.utf8))?.at.timeIntervalSince1970,
+                       ISO8601DateFormatter().date(from: "2026-11-13T01:00:00Z")!.timeIntervalSince1970 + 0.25)
+    }
+
+    func testAC36NeedsYouFirstThenNewestFirst() {
+        let items = Attention.items([
+            record("done-old", "done", minutesAgo: 30),
+            record("ask", "needsYou", minutesAgo: 20, message: "要用哪個方案?"),
+            record("done-new", "done", minutesAgo: 1),
+            record("perm", "needsYou", minutesAgo: 5),
+        ], desktop: [:], now: now)
+        XCTAssertEqual(items.map(\.id), ["perm", "ask", "done-new", "done-old"])
+        XCTAssertEqual(items.map(\.reason), ["等你回覆", "要用哪個方案?", "做完了", "做完了"])
+        XCTAssertEqual(items[0].folder, "demo")
+    }
+
+    func testAC37DesktopSessionGivesTitleAndJumpTerminalHasNone() {
+        let desktop = ["cli-1": DesktopSession(sessionId: "local_7", cliSessionId: "cli-1", title: "發布 1.0")]
+        let items = Attention.items([record("cli-1", "needsYou", minutesAgo: 2), record("cli-2", "done", minutesAgo: 1)],
+                                   desktop: desktop, now: now)
+        XCTAssertEqual(items[0].title, "發布 1.0")
+        XCTAssertEqual(items[0].target, URL(string: "claude://claude.ai/epitaxy/local_7"))
+        XCTAssertEqual(items[1].title, "demo")
+        XCTAssertNil(items[1].target)
+    }
+
+    func testAC38HidesOldArchivedAndAlreadySeen() {
+        let seenAt = now.addingTimeInterval(-60).timeIntervalSince1970 * 1000
+        let desktop = [
+            "archived": DesktopSession(sessionId: "local_a", cliSessionId: "archived", title: "a", isArchived: true),
+            "seen": DesktopSession(sessionId: "local_s", cliSessionId: "seen", title: "s", lastFocusedAt: seenAt),
+            "unseen": DesktopSession(sessionId: "local_u", cliSessionId: "unseen", title: "u", lastFocusedAt: seenAt),
+        ]
+        let items = Attention.items([
+            record("old", "done", minutesAgo: 8 * 24 * 60),
+            record("week", "done", minutesAgo: 7 * 24 * 60 - 1),
+            record("archived", "done", minutesAgo: 1),
+            record("seen", "done", minutesAgo: 5),
+            record("unseen", "done", minutesAgo: 0.5),
+        ], desktop: desktop, now: now)
+        XCTAssertEqual(items.map(\.id), ["unseen", "week"])
+    }
+
+    func testAC37DesktopIndexReadsCliSessionIds() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("gtd-desktop-\(UUID())")
+        let folder = root.appendingPathComponent("a/b")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(#"{"sessionId":"local_7","cliSessionId":"cli-1","title":"t","extra":{"x":1}}"#.utf8)
+            .write(to: folder.appendingPathComponent("local_7.json"))
+        try Data("not json".utf8).write(to: folder.appendingPathComponent("local_8.json"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let index = DesktopSession.index(root: root.path)
+        XCTAssertEqual(Array(index.keys), ["cli-1"])
+        let path = try XCTUnwrap(index["cli-1"])
+        XCTAssertEqual(FileManager.default.contents(atPath: path).flatMap(DesktopSession.decode)?.sessionId, "local_7")
+    }
+
+    func testAgeText() {
+        XCTAssertEqual(Attention.age(now.addingTimeInterval(-30), now: now), "剛剛")
+        XCTAssertEqual(Attention.age(now.addingTimeInterval(-5 * 60), now: now), "5 分鐘前")
+        XCTAssertEqual(Attention.age(now.addingTimeInterval(-3 * 3600), now: now), "3 小時前")
+        XCTAssertEqual(Attention.age(now.addingTimeInterval(-2 * 86400), now: now), "2 天前")
     }
 }

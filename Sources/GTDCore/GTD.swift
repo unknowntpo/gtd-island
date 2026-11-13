@@ -130,6 +130,7 @@ public struct GTDTab: Hashable, Identifiable {
     public static let activity = GTDTab("動態")
     public static let other = GTDTab("其他")
     public static let find = GTDTab("找 session")
+    public static let waiting = GTDTab("等你")
 }
 
 /// One user-defined tab from `config.json`.
@@ -172,7 +173,7 @@ public struct TabConfig: Decodable, Equatable {
     public static let empty = TabConfig(rules: [])
 
     public init(rules: [TabRule], thirdSlot: String? = nil) {
-        var seen: Set<String> = ["", GTDTab.now.name, GTDTab.activity.name, GTDTab.other.name, GTDTab.find.name]
+        var seen: Set<String> = ["", GTDTab.now.name, GTDTab.activity.name, GTDTab.other.name, GTDTab.find.name, GTDTab.waiting.name]
         self.rules = rules.filter { seen.insert($0.name).inserted }
         self.thirdSlot = thirdSlot.map(GTDTab.init)
     }
@@ -188,7 +189,7 @@ public struct TabConfig: Decodable, Equatable {
         return (try? JSONDecoder().decode(TabConfig.self, from: data)) ?? .empty
     }
 
-    public var tabs: [GTDTab] { [.now, .activity] + thirdSlotChoices.dropLast() + [.other, .find] }
+    public var tabs: [GTDTab] { [.now, .waiting, .activity] + thirdSlotChoices.dropLast() + [.other, .find] }
     public var thirdSlotChoices: [GTDTab] { rules.map { GTDTab($0.name) } + [.other] }
 
     public func tab(for project: Project) -> GTDTab {
@@ -374,10 +375,15 @@ public enum ThirdSlot {
 /// panel hangs down from the same point and is kept inside the visible area.
 public enum Placement {
     static let key = "panelAnchor"
-    public static let gap: CGFloat = 4
+    public static let gap: CGFloat = 0
 
-    public static func defaultAnchor(_ visible: CGRect) -> CGPoint {
-        CGPoint(x: visible.midX, y: visible.maxY - gap)
+    /// The visible area stretched up to the screen's top edge, so the panel may sit over the menu bar (AC40).
+    public static func area(visible: CGRect, screen: CGRect) -> CGRect {
+        CGRect(x: visible.minX, y: visible.minY, width: visible.width, height: screen.maxY - visible.minY)
+    }
+
+    public static func defaultAnchor(_ area: CGRect) -> CGPoint {
+        CGPoint(x: area.midX, y: area.maxY - gap)
     }
 
     public static func frame(size: CGSize, anchor: CGPoint, visible: CGRect) -> CGRect {
@@ -401,5 +407,129 @@ public enum Placement {
 
     public static func save(_ point: CGPoint, _ defaults: UserDefaults) {
         defaults.set([Double(point.x), Double(point.y)], forKey: key)
+    }
+}
+
+/// One file in `~/.gtd-island/attention`, written by `attention.py` (AC33).
+public struct AttentionRecord: Decodable, Equatable {
+    public let sessionId: String
+    public let cwd: String
+    public let state: String
+    public let message: String
+    public let at: Date
+
+    public init(sessionId: String, cwd: String, state: String, message: String, at: Date) {
+        self.sessionId = sessionId
+        self.cwd = cwd
+        self.state = state
+        self.message = message
+        self.at = at
+    }
+
+    public var needsYou: Bool { state == "needsYou" }
+
+    static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        // `attention.py` writes milliseconds, so a focus earlier in the same second still counts as earlier (AC38).
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            guard let date = fractional.date(from: text) ?? plain.date(from: text) else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "bad date \(text)"))
+            }
+            return date
+        }
+        return decoder
+    }()
+
+    public static func decode(_ data: Data) -> AttentionRecord? { try? decoder.decode(AttentionRecord.self, from: data) }
+
+    /// Every record in the folder; files that do not parse are skipped.
+    public static func load(folder: String) -> [AttentionRecord] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
+        return names.filter { $0.hasSuffix(".json") }.compactMap { name in
+            FileManager.default.contents(atPath: (folder as NSString).appendingPathComponent(name)).flatMap(decode)
+        }
+    }
+}
+
+/// The few fields GTD Island reads from a Claude desktop app session file. The format is
+/// undocumented, so every field is optional and a file that does not parse is skipped.
+public struct DesktopSession: Decodable, Equatable {
+    public let sessionId: String
+    public let cliSessionId: String?
+    public let title: String?
+    public let isArchived: Bool?
+    /// Milliseconds since 1970.
+    public let lastFocusedAt: Double?
+
+    public init(sessionId: String, cliSessionId: String?, title: String?, isArchived: Bool? = nil, lastFocusedAt: Double? = nil) {
+        self.sessionId = sessionId
+        self.cliSessionId = cliSessionId
+        self.title = title
+        self.isArchived = isArchived
+        self.lastFocusedAt = lastFocusedAt
+    }
+
+    public static func decode(_ data: Data) -> DesktopSession? { try? JSONDecoder().decode(DesktopSession.self, from: data) }
+
+    /// Maps each CLI session id to the desktop session file that holds it.
+    public static func index(root: String) -> [String: String] {
+        var index: [String: String] = [:]
+        let fm = FileManager.default
+        for a in (try? fm.contentsOfDirectory(atPath: root)) ?? [] {
+            let first = (root as NSString).appendingPathComponent(a)
+            for b in (try? fm.contentsOfDirectory(atPath: first)) ?? [] {
+                let second = (first as NSString).appendingPathComponent(b)
+                for name in (try? fm.contentsOfDirectory(atPath: second)) ?? [] where name.hasPrefix("local_") && name.hasSuffix(".json") {
+                    let path = (second as NSString).appendingPathComponent(name)
+                    if let cli = fm.contents(atPath: path).flatMap(decode)?.cliSessionId { index[cli] = path }
+                }
+            }
+        }
+        return index
+    }
+}
+
+/// One row of the 等你 tab (AC36-AC38).
+public struct AttentionItem: Identifiable, Equatable {
+    public let id: String
+    public let title: String
+    public let reason: String
+    public let folder: String
+    public let at: Date
+    public let needsYou: Bool
+    /// The desktop app link; nil for a terminal session.
+    public let target: URL?
+}
+
+public enum Attention {
+    public static let maxAge: TimeInterval = 7 * 24 * 3600
+
+    /// `desktop` maps a CLI session id to its desktop session, when one exists.
+    public static func items(_ records: [AttentionRecord], desktop: [String: DesktopSession], now: Date) -> [AttentionItem] {
+        records.compactMap { record -> AttentionItem? in
+            guard now.timeIntervalSince(record.at) <= maxAge else { return nil }
+            let session = desktop[record.sessionId]
+            if session?.isArchived == true { return nil }
+            if let focused = session?.lastFocusedAt, focused / 1000 > record.at.timeIntervalSince1970 { return nil }
+            let folder = record.cwd.isEmpty ? "" : URL(fileURLWithPath: record.cwd).lastPathComponent
+            let title = session?.title.flatMap { $0.isEmpty ? nil : $0 } ?? (folder.isEmpty ? record.sessionId : folder)
+            return AttentionItem(id: record.sessionId, title: title,
+                                 reason: record.message.isEmpty ? (record.needsYou ? "等你回覆" : "做完了") : record.message,
+                                 folder: folder, at: record.at, needsYou: record.needsYou,
+                                 target: session.flatMap { URL(string: "claude://claude.ai/epitaxy/\($0.sessionId)") })
+        }
+        .sorted { ($0.needsYou ? 0 : 1, -$0.at.timeIntervalSince1970) < ($1.needsYou ? 0 : 1, -$1.at.timeIntervalSince1970) }
+    }
+
+    public static func age(_ at: Date, now: Date) -> String {
+        let minutes = Int(now.timeIntervalSince(at) / 60)
+        if minutes < 1 { return "剛剛" }
+        if minutes < 60 { return "\(minutes) 分鐘前" }
+        if minutes < 24 * 60 { return "\(minutes / 60) 小時前" }
+        return "\(minutes / (24 * 60)) 天前"
     }
 }

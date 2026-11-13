@@ -75,7 +75,7 @@ Example:`config.json` 有 `"tabs": [{"name": "工作", "areas": ["Client Work"]}
 Example:使用者同時開 3 個 session。「發布 1.0」問了一個選項題,「整理測試」做完一輪。瀏海左邊顯示「2 等你」。使用者打開「等你」分頁,第 1 列是「發布 1.0 · 有問題要你回答」,第 2 列是「整理測試 · 做完了」。使用者按 `1`,桌面 app 跳到「發布 1.0」。使用者回答後,這一列消失,瀏海顯示「1 等你」。
 - AC33 `attention.py` 是 Claude Code 的 hook。它從 stdin 讀一個 hook 事件,寫入或刪除 `~/.gtd-island/attention/<session_id>.json`。檔案內容有 `sessionId`、`cwd`、`state`、`message`、`at`(UTC ISO 8601,精確到毫秒)。
 - AC34 事件對應:`PreToolUse` 的工具是 `AskUserQuestion` 時,寫入 `state = "needsYou"`,`message` 是第一個問題。`Notification` 寫入 `needsYou`,`message` 是通知文字;但閒置提醒(`notification_type` 是 `idle_prompt`)在已有紀錄時不改紀錄。`Stop` 寫入 `state = "done"`。`UserPromptSubmit` 和 `SessionEnd` 刪除檔案。`PostToolUse` 在紀錄是 `needsYou` 時刪除檔案,因為工具已經執行,代表使用者已經回應。已知限制:同時執行多個工具時,另一個工具先完成也會刪掉紀錄。
-- AC35 `attention.py` 只用 Python 標準函式庫,不依賴 macOS。它永遠以結束碼 0 結束,不輸出任何文字,所以不會擋住或改變 session。無法解析的輸入、沒有 `session_id`、或 `session_id` 含有英數字和 `-`、`_` 以外的字元時,它什麼都不做。
+- AC35 `attention.py` 只用 Python 標準函式庫,不依賴 macOS。它永遠以結束碼 0 結束。除了 AC44、AC45 使用者在面板做的決定,它不輸出任何文字,所以不會改變 session。無法解析的輸入、沒有 `session_id`、或 `session_id` 含有英數字和 `-`、`_` 以外的字元時,它什麼都不做。
 - AC36 面板的分頁列在「先看這 3 件」後面加上固定分頁「等你」。「等你」列出 attention 資料夾的紀錄:`needsYou` 在前,`done` 在後,同一種依 `at` 新到舊。每列顯示 session 標題、原因(有 `message` 時顯示它;否則 `needsYou` 顯示「等你回覆」,`done` 顯示「做完了」)、資料夾名稱、距今多久。
 - AC37 標題和跳轉來自桌面 app 的 session 紀錄:`cliSessionId` 等於 `sessionId` 的那一筆。有這筆時,標題是它的 `title`,點擊或按數字鍵打開 `claude://claude.ai/epitaxy/<它的 sessionId>`。沒有這筆時(終端機的 session),標題是 `cwd` 的資料夾名稱,列上顯示「在終端機」,不能跳轉。
 - AC38 以下紀錄不列出:`at` 超過 7 天;桌面 app 紀錄已封存;桌面 app 紀錄的 `lastFocusedAt` 晚於 `at`(使用者已經看過)。
@@ -83,3 +83,17 @@ Example:使用者同時開 3 個 session。「發布 1.0」問了一個選項題
 - AC40 這一節取代 AC29、AC30 的「可見範圍」:範圍改成可見範圍往上延伸到螢幕上緣(含選單列)。預設位置是主螢幕上緣置中,不留空隙。拖曳和儲存位置照 AC28。
 - AC42 滑鼠離開展開的面板 0.4 秒後,面板收起;0.4 秒內移回來就不收。用鍵盤打開、滑鼠還沒進過面板時不收。按著滑鼠(拖曳中)或在「找 session」分頁時不收。
 - AC41 `scripts/install.sh` 把 `attention.py` 複製到 `~/.gtd-island/`,並把 AC34 的事件加進 `~/.claude/settings.json`。已經存在的同一個指令不重複加入;其他 hooks 不變;寫入前先備份原檔。
+
+### 在瀏海裡回答(2026-11-13)
+目的:取代 CodeIsland 的第二階段。使用者不用切到 session,就能在瀏海核准權限、回答選項題。面板沒在執行或沒人回答時,session 照 Claude 原本的方式詢問,不會卡住。
+Example:session「發布 1.0」要執行 `npm publish`,需要權限。瀏海自動展開到「等你」分頁,第 1 列顯示「Bash · npm publish」和「允許」「拒絕」「到 app 處理」。使用者按「允許」,指令執行,這一列消失。另一個 session 問「要用哪個方案?」,選項是 A、B;使用者在瀏海點 B 再按「送出」,Claude 收到答案 B。
+- AC43 面板執行時,每 3 秒更新 `~/.gtd-island/island.alive` 的修改時間。hook 只在這個檔案 10 秒內更新過時才在瀏海詢問;否則照 AC33–AC35,不等待。
+- AC44 `PermissionRequest` 事件:hook 先照 AC34 寫入 `needsYou`(`message` 是「工具 · 摘要」),再寫入請求檔 `~/.gtd-island/requests/<請求 id>.json`,然後每 0.2 秒檢查回覆檔 `~/.gtd-island/responses/<請求 id>.json`,最多 120 秒。回覆 `allow` 時輸出允許,`deny` 時輸出拒絕和「使用者在 GTD Island 拒絕」。摘要是 `command`、`file_path`、`url` 或 `pattern` 中第一個有值的欄位。
+- AC45 `PreToolUse` 的 `AskUserQuestion`:hook 照 AC34 寫入紀錄,再照 AC44 送出請求並等待。回覆帶 `answers` 時,輸出 `permissionDecision: allow`,`updatedInput` 是原本的 `questions` 加上 `answers`。`answers` 的鍵是問題文字,值是選到的選項標籤;多選時用「, 」連接。
+- AC46 回覆 `skip`、等待逾時、請求檔被刪除,或回覆檔無法解析時,hook 刪除自己的請求檔和回覆檔,不輸出任何文字,結束碼 0,讓 Claude 照原本的方式詢問。hook 的任何錯誤也是這樣處理。
+- AC47 `UserPromptSubmit`、`SessionEnd`、`Stop` 和 `PostToolUse` 刪除該 session 的所有請求檔,讓還在等待的 hook 結束。使用者在 app 裡回答後,瀏海上的請求就消失。
+- AC48 「等你」分頁把請求顯示在對應 session 的列上。權限請求有「允許」「拒絕」「到 app 處理」。選項題每題列出選項,單選題點一下就選定,多選題可以點多個;每題都選了才能按「送出」;另有「到 app 處理」。超過 130 秒的請求檔不顯示。
+- AC49 出現新的請求時,面板自動展開到「等你」分頁,但不搶鍵盤焦點。滑鼠進入面板後,面板才取得焦點,按鈕第一下點擊就有效。
+- AC50 `install.sh` 照 AC41 加上 `PermissionRequest` 事件,並把 `PreToolUse` 和 `PermissionRequest` 的 hook 逾時設為 130 秒;已經安裝過的同一個指令只更新逾時。
+- AC51 `AskUserQuestion` 的 `PermissionRequest` 事件:hook 不寫紀錄、不送請求,也不輸出文字。在瀏海按「到 app 處理」後,Claude Code 會為同一題再發出這個事件;它若顯示成權限卡,按「允許」會讓問題沒有答案就過關。
+- 已知限制:CodeIsland 的 hook 也會回答權限請求。兩者都回答時,Claude Code 採用哪一個沒有文件說明,所以這一階段完成後要移除 CodeIsland 的 hooks。選項題在等待期間,app 不會顯示這個問題,要按「到 app 處理」或等 120 秒。

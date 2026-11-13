@@ -490,4 +490,58 @@ final class GTDTests: XCTestCase {
         XCTAssertEqual(Attention.age(now.addingTimeInterval(-3 * 3600), now: now), "3 小時前")
         XCTAssertEqual(Attention.age(now.addingTimeInterval(-2 * 86400), now: now), "2 天前")
     }
+
+    // MARK: 在瀏海裡回答 (AC44-AC48)
+
+    let questionJSON = #"{"id":"s1--1","sessionId":"s1","cwd":"/r","kind":"question","at":"2026-11-13T01:00:00.000Z","questions":[{"question":"方案?","header":"方案","multiSelect":false,"options":[{"label":"A","description":"a"},{"label":"B","description":"b"}]},{"question":"環境?","multiSelect":true,"options":[{"label":"dev"},{"label":"prod"}]}]}"#
+
+    func testAC45RequestDecodesQuestions() throws {
+        let r = try XCTUnwrap(PendingRequest.decode(Data(questionJSON.utf8)))
+        XCTAssertTrue(r.isQuestion)
+        XCTAssertEqual(r.questions?.map(\.question), ["方案?", "環境?"])
+        XCTAssertEqual(r.questions?[1].options.map(\.label), ["dev", "prod"])
+        let empty = #"{"id":"x","sessionId":"s1","kind":"question","at":"2026-11-13T01:00:00Z","questions":[]}"#
+        XCTAssertNil(PendingRequest.decode(Data(empty.utf8)))
+    }
+
+    func testAC48QuestionReplyNeedsEveryAnswer() throws {
+        let r = try XCTUnwrap(PendingRequest.decode(Data(questionJSON.utf8)))
+        XCTAssertNil(r.reply(choices: ["方案?": ["B"]]))
+        XCTAssertNil(r.reply(choices: ["方案?": ["B"], "環境?": []]))
+        let data = try XCTUnwrap(r.reply(choices: ["方案?": ["B"], "環境?": ["prod", "dev", "ghost"]]))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: [String: Any]])
+        XCTAssertEqual(json["answers"]?["方案?"] as? String, "B")
+        XCTAssertEqual(json["answers"]?["環境?"] as? [String], ["dev", "prod"])
+    }
+
+    func testAC44PermissionReplies() {
+        XCTAssertEqual(String(data: PendingRequest.reply(decision: "allow"), encoding: .utf8), #"{"decision":"allow"}"#)
+        XCTAssertEqual(String(data: PendingRequest.reply(decision: "deny"), encoding: .utf8), #"{"decision":"deny"}"#)
+        XCTAssertEqual(String(data: PendingRequest.reply(decision: "skip"), encoding: .utf8), #"{"skip":true}"#)
+    }
+
+    func testAC48OldRequestFilesAreIgnored() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("gtd-req-\(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let fresh = #"{"id":"a","sessionId":"s1","kind":"permission","toolName":"Bash","detail":"Bash · ls","at":"2026-11-13T01:00:00Z"}"#
+        try Data(fresh.utf8).write(to: folder.appendingPathComponent("a.json"))
+        let at = ISO8601DateFormatter().date(from: "2026-11-13T01:00:00Z")!
+        XCTAssertEqual(PendingRequest.load(folder: folder.path, now: at.addingTimeInterval(129)).map(\.id), ["a"])
+        XCTAssertEqual(PendingRequest.load(folder: folder.path, now: at.addingTimeInterval(131)).map(\.id), [])
+    }
+
+    func testAC48RequestStaysVisibleAndAttachesToItsSession() throws {
+        let r = try XCTUnwrap(PendingRequest.decode(Data(questionJSON.utf8)))
+        let seen = r.at.addingTimeInterval(10).timeIntervalSince1970 * 1000
+        let desktop = ["s1": DesktopSession(sessionId: "local_1", cliSessionId: "s1", title: "發布 1.0", lastFocusedAt: seen)]
+        let rec = AttentionRecord(sessionId: "s1", cwd: "/r", state: "needsYou", message: "方案?", at: r.at)
+        let items = Attention.items([rec], desktop: desktop, now: r.at.addingTimeInterval(20), requests: [r])
+        XCTAssertEqual(items.map(\.id), ["s1"])
+        XCTAssertEqual(items[0].request?.id, "s1--1")
+        XCTAssertTrue(Attention.items([rec], desktop: desktop, now: r.at.addingTimeInterval(20)).isEmpty)
+        let alone = Attention.items([], desktop: [:], now: r.at, requests: [r])
+        XCTAssertEqual(alone.map(\.id), ["s1"])
+        XCTAssertTrue(alone[0].needsYou)
+    }
 }

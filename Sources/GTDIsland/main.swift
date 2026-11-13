@@ -9,6 +9,9 @@ let refreshScript = NSString(string: "~/.gtd-island/refresh.py").expandingTildeI
 let routeScript = NSString(string: "~/.gtd-island/route.py").expandingTildeInPath
 let routePython = NSString(string: "~/.gtd-island/venv/bin/python").expandingTildeInPath
 let attentionFolder = NSString(string: "~/.gtd-island/attention").expandingTildeInPath
+let requestsFolder = NSString(string: "~/.gtd-island/requests").expandingTildeInPath
+let responsesFolder = NSString(string: "~/.gtd-island/responses").expandingTildeInPath
+let aliveFile = NSString(string: "~/.gtd-island/island.alive").expandingTildeInPath
 let desktopSessionsRoot = NSString(string: "~/Library/Application Support/Claude/claude-code-sessions").expandingTildeInPath
 
 /// The long-lived `route.py` helper. It holds the model in memory, so it runs only while the tab is in use.
@@ -89,6 +92,11 @@ final class Store: ObservableObject {
     private var unknownIDs: Set<String> = []
     private var indexedAt = Date.distantPast
     private var attentionTimer: Timer?
+    /// Choices made so far on each question request, by request id (AC48).
+    @Published var choices: [String: [String: Set<String>]] = [:]
+    private var seenRequests: Set<String> = []
+    /// Called when a request the panel has not shown before appears; returns false when it could not show it (AC49).
+    var onNewRequest: () -> Bool = { true }
     var collapse: () -> Void = {}
     private var route: RouteProcess?
     private var routeGeneration = 0
@@ -266,8 +274,66 @@ final class Store: ObservableObject {
                 desktop[record.sessionId] = session
             }
         }
-        let items = Attention.items(records, desktop: desktop, now: Date())
+        markAlive()
+        let requests = PendingRequest.load(folder: requestsFolder, now: Date())
+        let items = Attention.items(records, desktop: desktop, now: Date(), requests: requests)
         if items != attention { attention = items }
+        let ids = Set(requests.map(\.id))
+        let fresh = !ids.subtracting(seenRequests).isEmpty
+        // A request that arrives while the 找 session tab is open stays unseen, so it opens the panel later.
+        if !fresh || onNewRequest() { seenRequests = ids }
+        choices = choices.filter { ids.contains($0.key) }
+        removeOldReplies()
+    }
+
+    /// Replies the hook never read (it had already given up) are removed once no hook can wait for them.
+    func removeOldReplies() {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: responsesFolder)) ?? [] {
+            let path = (responsesFolder as NSString).appendingPathComponent(name)
+            let modified = (try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? Date()
+            if Date().timeIntervalSince(modified) > PendingRequest.maxAge { try? fm.removeItem(atPath: path) }
+        }
+    }
+
+    /// Tells the hook the panel is running (AC43).
+    func markAlive() {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: aliveFile) {
+            try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: aliveFile)
+        } else {
+            fm.createFile(atPath: aliveFile, contents: Data())
+        }
+    }
+
+    func reply(_ request: PendingRequest, _ body: Data) {
+        try? FileManager.default.createDirectory(atPath: responsesFolder, withIntermediateDirectories: true)
+        let url = URL(fileURLWithPath: responsesFolder).appendingPathComponent(request.id + ".json")
+        try? body.write(to: url, options: .atomic)
+        // The hook removes the request file once it reads the reply; hide it now so it is not answered twice.
+        attention = attention.map { item in
+            guard item.request?.id == request.id else { return item }
+            var copy = item
+            copy.request = nil
+            return copy
+        }
+    }
+
+    func decide(_ request: PendingRequest, _ decision: String) { reply(request, PendingRequest.reply(decision: decision)) }
+
+    func toggle(_ request: PendingRequest, _ question: AskQuestion, _ label: String) {
+        var picked = choices[request.id]?[question.question] ?? []
+        if question.multiSelect == true {
+            if picked.contains(label) { picked.remove(label) } else { picked.insert(label) }
+        } else {
+            picked = [label]
+        }
+        choices[request.id, default: [:]][question.question] = picked
+    }
+
+    func submit(_ request: PendingRequest) {
+        guard let body = request.reply(choices: choices[request.id] ?? [:]) else { return }
+        reply(request, body)
     }
 
     func open(_ item: AttentionItem) {
@@ -556,7 +622,101 @@ struct FindView: View {
     }
 }
 
+/// A small capsule button for answering in the panel.
+struct ChoiceButton: View {
+    let label: String
+    var selected = false
+    var primary = false
+    var enabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label).font(.system(size: 12, weight: primary || selected ? .semibold : .regular))
+                .foregroundColor(primary || selected ? .islandBackground : .islandText)
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(primary || selected ? Color.islandAccent : Color.clear)
+                .overlay(Capsule().stroke(selected || primary ? Color.islandAccent : Color.islandBorder))
+                .clipShape(Capsule())
+                .opacity(enabled ? 1 : 0.4)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+}
+
+/// The permission or question a hook is waiting on, with the buttons that answer it (AC48).
+struct RequestView: View {
+    @ObservedObject var store: Store
+    let request: PendingRequest
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if request.isQuestion {
+                ForEach(request.questions ?? [], id: \.question) { q in
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(q.question + (q.multiSelect == true ? "(可複選)" : ""))
+                            .font(.system(size: 12, weight: .semibold)).foregroundColor(.islandText)
+                            .fixedSize(horizontal: false, vertical: true)
+                        FlowRow(spacing: 6) {
+                            ForEach(q.options, id: \.label) { option in
+                                ChoiceButton(label: option.label,
+                                             selected: store.choices[request.id]?[q.question]?.contains(option.label) ?? false) {
+                                    store.toggle(request, q, option.label)
+                                }
+                                .help(option.description ?? "")
+                            }
+                        }
+                    }
+                }
+                HStack(spacing: 6) {
+                    ChoiceButton(label: "送出", primary: true,
+                                 enabled: request.reply(choices: store.choices[request.id] ?? [:]) != nil) { store.submit(request) }
+                    ChoiceButton(label: "到 app 處理") { store.decide(request, "skip") }
+                }
+            } else {
+                HStack(spacing: 6) {
+                    ChoiceButton(label: "允許", primary: true) { store.decide(request, "allow") }
+                    ChoiceButton(label: "拒絕") { store.decide(request, "deny") }
+                    ChoiceButton(label: "到 app 處理") { store.decide(request, "skip") }
+                }
+            }
+        }
+        .padding(.top, 4)
+    }
+}
+
+/// Lays children left to right and wraps to a new line when the row is full.
+struct FlowRow: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, line: CGFloat = 0, widest: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > width { x = 0; y += line + spacing; line = 0 }
+            x += size.width + spacing
+            line = max(line, size.height)
+            widest = max(widest, x - spacing)
+        }
+        return CGSize(width: min(widest, width), height: y + line)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, line: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX { x = bounds.minX; y += line + spacing; line = 0 }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            line = max(line, size.height)
+        }
+    }
+}
+
 struct AttentionRow: View {
+    @ObservedObject var store: Store
     let index: Int
     let item: AttentionItem
     let action: () -> Void
@@ -569,8 +729,11 @@ struct AttentionRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.title).font(.system(size: 13, weight: .semibold)).foregroundColor(.islandText)
                     .lineLimit(2).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
-                Text(item.reason).font(.system(size: 12))
-                    .foregroundColor(item.needsYou ? .orange : .islandMuted).lineLimit(2)
+                // A permission request shows the full command it asks about.
+                let reason = item.request.flatMap { $0.isQuestion ? nil : $0.detail } ?? item.reason
+                Text(reason).font(.system(size: 12, design: item.request?.isQuestion == false ? .monospaced : .default))
+                    .foregroundColor(item.needsYou ? .orange : .islandMuted).lineLimit(item.request == nil ? 2 : 4)
+                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Text(Attention.age(item.at, now: Date()))
                     if !item.folder.isEmpty { Text(item.folder).lineLimit(1) }
@@ -581,6 +744,7 @@ struct AttentionRow: View {
                         Text("打開 session ↗").font(.system(size: 11, weight: .semibold)).foregroundColor(.islandAccent)
                     }
                 }.font(.system(size: 11)).foregroundColor(.islandMuted)
+                if let request = item.request { RequestView(store: store, request: request) }
             }
         }
         .padding(10)
@@ -604,7 +768,7 @@ struct AttentionView: View {
                     Text("目前沒有 session 在等你。").foregroundColor(.islandMuted).font(.system(size: 13))
                 }
                 ForEach(Array(store.attention.enumerated()), id: \.element.id) { i, item in
-                    AttentionRow(index: i + 1, item: item) { store.open(item) }
+                    AttentionRow(store: store, index: i + 1, item: item) { store.open(item) }
                 }
             }
         }
@@ -730,6 +894,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Watches the mouse while the panel is open, to close it after the mouse leaves (AC42).
     var leaveWatch: Timer?
     var mouseWasInside = false
+    /// The panel opened by itself for a request; it closes again when no request is left and the mouse never came.
+    var openedForRequest = false
     var mouseLeftAt: Date?
     /// The top center of the pill, chosen by dragging; nil means the default place.
     var anchor: CGPoint?
@@ -746,6 +912,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // A helper that died must not end the app when the panel writes to its pipe.
         signal(SIGPIPE, SIG_IGN)
         store.collapse = { [weak self] in self?.setExpanded(false) }
+        store.onNewRequest = { [weak self] in self?.showRequests() ?? true }
         panel = IslandPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .statusBar
         panel.isOpaque = false
@@ -960,8 +1127,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
-    func setExpanded(_ expanded: Bool) {
+    /// Opens the 等你 tab for a new request without taking the keyboard from the current app (AC49).
+    @discardableResult
+    func showRequests() -> Bool {
+        guard store.tab != .find else { return false }
+        if !store.isExpanded {
+            setExpanded(true, takeFocus: false)
+            openedForRequest = true
+        }
+        store.tab = .waiting
+        return true
+    }
+
+    func setExpanded(_ expanded: Bool, takeFocus: Bool = true) {
         guard expanded != store.isExpanded else { return }
+        openedForRequest = false
         hoverOpen?.cancel()
         hoverOpen = nil
         store.isExpanded = expanded
@@ -969,7 +1149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if expanded {
             store.load()
             store.refreshIfStale()
-            panel.makeKeyAndOrderFront(nil)
+            if takeFocus { panel.makeKeyAndOrderFront(nil) } else { panel.orderFrontRegardless() }
             startLeaveWatch()
         } else {
             leaveWatch?.invalidate()
@@ -994,12 +1174,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func checkMouseLeft(mouse: CGPoint = NSEvent.mouseLocation, pressed: Bool = NSEvent.pressedMouseButtons != 0, now: Date = Date()) {
         let inside = panel.frame.insetBy(dx: -8, dy: -8).contains(mouse)
+        // A panel opened without focus takes it once the mouse is over it, so the first click counts (AC49).
+        if inside, !panel.isKeyWindow, mouse == NSEvent.mouseLocation { panel.makeKey() }
         if inside || pressed || store.tab == .find {
             mouseWasInside = mouseWasInside || inside
             mouseLeftAt = nil
             return
         }
-        guard mouseWasInside else { return }
+        guard mouseWasInside else {
+            if openedForRequest, !store.attention.contains(where: { $0.request != nil }) { setExpanded(false) }
+            return
+        }
         let left = mouseLeftAt ?? now
         mouseLeftAt = left
         if now.timeIntervalSince(left) >= 0.4 { setExpanded(false) }
@@ -1086,6 +1271,14 @@ if let flag = CommandLine.arguments.firstIndex(of: "--render"), flag + 1 < Comma
         store.notch = NotchLayout(atTop: true, gap: 185, menuBar: 37)
         save("pill-notch", PillView(store: store), NSSize(width: 485, height: 37))
         store.tab = .waiting
+        let now = ISO8601DateFormatter().string(from: Date())
+        let ask = #"{"id":"demo--1","sessionId":"demo-a","kind":"question","at":"\#(now)","questions":[{"question":"要用哪個方案?","multiSelect":false,"options":[{"label":"A 先做 hook","description":""},{"label":"B 先做介面","description":""}]},{"question":"要測哪些環境?","multiSelect":true,"options":[{"label":"dev"},{"label":"staging"},{"label":"prod"}]}]}"#
+        let perm = #"{"id":"demo--2","sessionId":"demo-b","kind":"permission","toolName":"Bash","detail":"Bash · npm publish --access public","at":"\#(now)"}"#
+        let demo = [ask, perm].compactMap { PendingRequest.decode(Data($0.utf8)) }
+        store.attention = Attention.items([], desktop: [:], now: Date(), requests: demo) + store.attention
+        store.choices = ["demo--1": ["要測哪些環境?": ["dev", "prod"]]]
+        save("waiting-requests", ExpandedView(store: store), NSSize(width: 560, height: 560))
+        store.reloadAttention()
         save("waiting-notch", ExpandedView(store: store), NSSize(width: 560, height: 560))
         store.notch = NotchLayout(atTop: false, gap: 0, menuBar: 24)
         save("waiting", ExpandedView(store: store), NSSize(width: 560, height: 560))

@@ -503,24 +503,106 @@ public struct AttentionItem: Identifiable, Equatable {
     public let needsYou: Bool
     /// The desktop app link; nil for a terminal session.
     public let target: URL?
+    /// A question or permission the hook is waiting on (AC48).
+    public var request: PendingRequest? = nil
+}
+
+public struct AskOption: Codable, Equatable, Hashable {
+    public let label: String
+    public let description: String?
+
+    public init(label: String, description: String? = nil) {
+        self.label = label
+        self.description = description
+    }
+}
+
+public struct AskQuestion: Codable, Equatable {
+    public let question: String
+    public let header: String?
+    public let options: [AskOption]
+    public let multiSelect: Bool?
+
+    public init(question: String, header: String? = nil, options: [AskOption], multiSelect: Bool? = nil) {
+        self.question = question
+        self.header = header
+        self.options = options
+        self.multiSelect = multiSelect
+    }
+}
+
+/// One file in `~/.gtd-island/requests`, written by `attention.py` while it waits (AC44, AC45).
+public struct PendingRequest: Decodable, Equatable, Identifiable {
+    public let id: String
+    public let sessionId: String
+    public let kind: String
+    public let toolName: String?
+    public let detail: String?
+    public let questions: [AskQuestion]?
+    public let at: Date
+
+    public static let maxAge: TimeInterval = 130
+
+    public var isQuestion: Bool { kind == "question" }
+
+    public static func decode(_ data: Data) -> PendingRequest? {
+        guard let request = try? AttentionRecord.decoder.decode(PendingRequest.self, from: data) else { return nil }
+        if request.isQuestion, request.questions?.isEmpty ?? true { return nil }
+        return request
+    }
+
+    /// Requests that are still waiting; older files belong to a hook that already gave up (AC48).
+    public static func load(folder: String, now: Date) -> [PendingRequest] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
+        return names.filter { $0.hasSuffix(".json") }.compactMap { name in
+            FileManager.default.contents(atPath: (folder as NSString).appendingPathComponent(name)).flatMap(decode)
+        }.filter { now.timeIntervalSince($0.at) <= maxAge }
+    }
+
+    /// The reply file body for a permission decision: "allow", "deny" or "skip".
+    public static func reply(decision: String) -> Data {
+        decision == "skip" ? Data(#"{"skip":true}"#.utf8) : Data(#"{"decision":"\#(decision)"}"#.utf8)
+    }
+
+    /// The reply for a question, or nil until every question has a choice (AC48).
+    public func reply(choices: [String: Set<String>]) -> Data? {
+        guard let questions else { return nil }
+        var answers: [String: Any] = [:]
+        for q in questions {
+            let picked = q.options.map(\.label).filter { choices[q.question]?.contains($0) ?? false }
+            if picked.isEmpty { return nil }
+            answers[q.question] = q.multiSelect == true ? picked : picked[0]
+        }
+        return try? JSONSerialization.data(withJSONObject: ["answers": answers], options: [.sortedKeys])
+    }
 }
 
 public enum Attention {
     public static let maxAge: TimeInterval = 7 * 24 * 3600
 
     /// `desktop` maps a CLI session id to its desktop session, when one exists.
-    public static func items(_ records: [AttentionRecord], desktop: [String: DesktopSession], now: Date) -> [AttentionItem] {
-        records.compactMap { record -> AttentionItem? in
+    public static func items(_ records: [AttentionRecord], desktop: [String: DesktopSession], now: Date,
+                             requests: [PendingRequest] = []) -> [AttentionItem] {
+        let waiting = Dictionary(requests.map { ($0.sessionId, $0) }, uniquingKeysWith: { a, b in a.at <= b.at ? a : b })
+        var all = records
+        for request in requests where !records.contains(where: { $0.sessionId == request.sessionId }) {
+            all.append(AttentionRecord(sessionId: request.sessionId, cwd: "", state: "needsYou",
+                                       message: request.detail ?? "", at: request.at))
+        }
+        return all.compactMap { record -> AttentionItem? in
+            let request = waiting[record.sessionId]
             guard now.timeIntervalSince(record.at) <= maxAge else { return nil }
             let session = desktop[record.sessionId]
             if session?.isArchived == true { return nil }
-            if let focused = session?.lastFocusedAt, focused / 1000 > record.at.timeIntervalSince1970 { return nil }
+            // A waiting request stays visible even when the user looked at the session (AC48).
+            if request == nil, let focused = session?.lastFocusedAt, focused / 1000 > record.at.timeIntervalSince1970 { return nil }
             let folder = record.cwd.isEmpty ? "" : URL(fileURLWithPath: record.cwd).lastPathComponent
             let title = session?.title.flatMap { $0.isEmpty ? nil : $0 } ?? (folder.isEmpty ? record.sessionId : folder)
             return AttentionItem(id: record.sessionId, title: title,
                                  reason: record.message.isEmpty ? (record.needsYou ? "等你回覆" : "做完了") : record.message,
                                  folder: folder, at: record.at, needsYou: record.needsYou,
-                                 target: session.flatMap { URL(string: "claude://claude.ai/epitaxy/\($0.sessionId)") })
+                                 target: session.flatMap { URL(string: "claude://claude.ai/epitaxy/\($0.sessionId)") },
+                                 request: request)
         }
         .sorted { ($0.needsYou ? 0 : 1, -$0.at.timeIntervalSince1970) < ($1.needsYou ? 0 : 1, -$1.at.timeIntervalSince1970) }
     }

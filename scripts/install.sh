@@ -14,7 +14,7 @@ python3 -I scripts/attention.py --install-hooks
 VENV="$HOME/.gtd-island/venv"
 [ -x "$VENV/bin/python" ] || uv venv --quiet --python 3.12 "$VENV"
 uv pip install --quiet --python "$VENV/bin/python" onnxruntime tokenizers numpy
-[ -f "$HOME/.gtd-island/models/multilingual-e5-small/model_O4.onnx" ] || echo "warning: routing model is missing; the 找 session tab will show an error"
+[ -f "$HOME/.gtd-island/models/multilingual-e5-small/model_O4.onnx" ] || echo "warning: routing model is missing; the search box will match titles only"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

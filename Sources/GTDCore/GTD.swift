@@ -129,7 +129,6 @@ public struct GTDTab: Hashable, Identifiable {
     public static let now = GTDTab("先看這 3 件")
     public static let activity = GTDTab("動態")
     public static let other = GTDTab("其他")
-    public static let find = GTDTab("找 session")
     public static let waiting = GTDTab("等你")
 }
 
@@ -173,7 +172,7 @@ public struct TabConfig: Decodable, Equatable {
     public static let empty = TabConfig(rules: [])
 
     public init(rules: [TabRule], thirdSlot: String? = nil) {
-        var seen: Set<String> = ["", GTDTab.now.name, GTDTab.activity.name, GTDTab.other.name, GTDTab.find.name, GTDTab.waiting.name]
+        var seen: Set<String> = ["", GTDTab.now.name, GTDTab.activity.name, GTDTab.other.name, GTDTab.waiting.name]
         self.rules = rules.filter { seen.insert($0.name).inserted }
         self.thirdSlot = thirdSlot.map(GTDTab.init)
     }
@@ -189,7 +188,7 @@ public struct TabConfig: Decodable, Equatable {
         return (try? JSONDecoder().decode(TabConfig.self, from: data)) ?? .empty
     }
 
-    public var tabs: [GTDTab] { [.now, .waiting, .activity] + thirdSlotChoices.dropLast() + [.other, .find] }
+    public var tabs: [GTDTab] { [.now, .waiting, .activity] + thirdSlotChoices.dropLast() + [.other] }
     public var thirdSlotChoices: [GTDTab] { rules.map { GTDTab($0.name) } + [.other] }
 
     public func tab(for project: Project) -> GTDTab {
@@ -342,7 +341,7 @@ public enum Ranking {
     public static func view(_ tab: GTDTab, rows: [Project], today: Date, calendar: Calendar = .current,
                             config: TabConfig = .empty, thirdSlot: GTDTab? = nil)
         -> (actionable: [Project], waiting: [Project]) {
-        if tab == .find || tab == .activity { return ([], []) }
+        if tab == .activity { return ([], []) }
         let ranked = actionable(rows, today: today, calendar: calendar)
         if tab == .now { return (topThree(ranked, config: config, thirdSlot: thirdSlot), []) }
         return (ranked.filter { config.tab(for: $0) == tab }, rows.filter { $0.isWaiting && config.tab(for: $0) == tab })
@@ -464,13 +463,41 @@ public struct DesktopSession: Decodable, Equatable {
     public let isArchived: Bool?
     /// Milliseconds since 1970.
     public let lastFocusedAt: Double?
+    public let cwd: String?
+    /// Set on sessions a scheduled task started.
+    public let scheduledTaskId: String?
 
-    public init(sessionId: String, cliSessionId: String?, title: String?, isArchived: Bool? = nil, lastFocusedAt: Double? = nil) {
+    public init(sessionId: String, cliSessionId: String?, title: String?, isArchived: Bool? = nil, lastFocusedAt: Double? = nil,
+                cwd: String? = nil, scheduledTaskId: String? = nil) {
         self.sessionId = sessionId
         self.cliSessionId = cliSessionId
         self.title = title
         self.isArchived = isArchived
         self.lastFocusedAt = lastFocusedAt
+        self.cwd = cwd
+        self.scheduledTaskId = scheduledTaskId
+    }
+
+    public var target: URL? { URL(string: "claude://claude.ai/epitaxy/\(sessionId)") }
+
+    /// Every desktop session file under `root`, for the search box (AC54).
+    public static func all(root: String) -> [DesktopSession] {
+        files(root: root).compactMap { FileManager.default.contents(atPath: $0).flatMap(decode) }
+    }
+
+    static func files(root: String) -> [String] {
+        var paths: [String] = []
+        let fm = FileManager.default
+        for a in (try? fm.contentsOfDirectory(atPath: root)) ?? [] {
+            let first = (root as NSString).appendingPathComponent(a)
+            for b in (try? fm.contentsOfDirectory(atPath: first)) ?? [] {
+                let second = (first as NSString).appendingPathComponent(b)
+                for name in (try? fm.contentsOfDirectory(atPath: second)) ?? [] where name.hasPrefix("local_") && name.hasSuffix(".json") {
+                    paths.append((second as NSString).appendingPathComponent(name))
+                }
+            }
+        }
+        return paths
     }
 
     public static func decode(_ data: Data) -> DesktopSession? { try? JSONDecoder().decode(DesktopSession.self, from: data) }
@@ -478,18 +505,66 @@ public struct DesktopSession: Decodable, Equatable {
     /// Maps each CLI session id to the desktop session file that holds it.
     public static func index(root: String) -> [String: String] {
         var index: [String: String] = [:]
-        let fm = FileManager.default
-        for a in (try? fm.contentsOfDirectory(atPath: root)) ?? [] {
-            let first = (root as NSString).appendingPathComponent(a)
-            for b in (try? fm.contentsOfDirectory(atPath: first)) ?? [] {
-                let second = (first as NSString).appendingPathComponent(b)
-                for name in (try? fm.contentsOfDirectory(atPath: second)) ?? [] where name.hasPrefix("local_") && name.hasSuffix(".json") {
-                    let path = (second as NSString).appendingPathComponent(name)
-                    if let cli = fm.contents(atPath: path).flatMap(decode)?.cliSessionId { index[cli] = path }
-                }
-            }
+        for path in files(root: root) {
+            if let cli = FileManager.default.contents(atPath: path).flatMap(decode)?.cliSessionId { index[cli] = path }
         }
         return index
+    }
+}
+
+/// One row of the search box (AC53-AC56).
+public struct SearchRow: Identifiable, Equatable {
+    public let id: String
+    public let title: String
+    /// Why the session waits, or its folder.
+    public let note: String
+    public let waiting: Bool
+    /// The desktop app link; nil for a terminal session.
+    public let target: URL?
+}
+
+public enum Search {
+    public static func rows(query: String, attention: [AttentionItem], sessions: [DesktopSession], matches: [SessionMatch],
+                            limit: Int = 8) -> [SearchRow] {
+        // A waiting session the 等你 list could not link yet borrows the link of its desktop session.
+        var links: [String: URL] = [:]
+        for session in sessions { if let cli = session.cliSessionId { links[cli] = session.target } }
+        let waiting = attention.map {
+            (row: SearchRow(id: "w:" + $0.id, title: $0.title, note: $0.reason, waiting: true, target: $0.target ?? links[$0.id]),
+             folder: $0.folder)
+        }
+        let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+        if words.isEmpty { return Array(waiting.map(\.row).prefix(limit)) }
+        func hit(_ title: String, _ folder: String) -> Bool {
+            let text = (title + " " + folder).lowercased()
+            return words.allSatisfy { text.contains($0) }
+        }
+        var rows = waiting.filter { hit($0.row.title, $0.folder) }.map(\.row)
+        var listed = Set(rows.compactMap(\.target))
+        let rest = sessions
+            .filter { $0.isArchived != true && $0.scheduledTaskId == nil && !($0.title ?? "").isEmpty }
+            .sorted { ($0.lastFocusedAt ?? 0) > ($1.lastFocusedAt ?? 0) }
+        for session in rest {
+            let folder = session.cwd.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+            guard let target = session.target, hit(session.title ?? "", folder), listed.insert(target).inserted else { continue }
+            rows.append(SearchRow(id: session.sessionId, title: session.title ?? "", note: folder, waiting: false, target: target))
+        }
+        for match in matches {
+            guard let target = match.target, listed.insert(target).inserted else { continue }
+            rows.append(SearchRow(id: match.id, title: match.title, note: match.folder, waiting: false, target: target))
+        }
+        return Array(rows.prefix(limit))
+    }
+
+    /// Where the selected row is now. The list changes under the user, so the selection follows the row, not its
+    /// position; a row that is gone gives the first row.
+    public static func index(of id: String?, in rows: [SearchRow]) -> Int {
+        rows.firstIndex { $0.id == id } ?? 0
+    }
+
+    /// The selected row after an arrow key; it never leaves the list.
+    public static func move(_ selection: Int, by step: Int, count: Int) -> Int {
+        max(0, min(count - 1, selection + step))
     }
 }
 

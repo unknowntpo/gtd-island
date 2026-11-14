@@ -94,7 +94,7 @@ final class GTDTests: XCTestCase {
     }
 
     func testAC23TabBarKeepsFixedTabsAroundConfiguredOnes() {
-        XCTAssertEqual(config.tabs.map(\.name), ["先看這 3 件", "等你", "動態", "工作", "閱讀", "Side", "其他", "找 session"])
+        XCTAssertEqual(config.tabs.map(\.name), ["先看這 3 件", "等你", "動態", "工作", "閱讀", "Side", "其他"])
     }
 
     func testAC24TitleOrLinkWinsOverAreaAndEarlierTabWins() throws {
@@ -120,7 +120,7 @@ final class GTDTests: XCTestCase {
         XCTAssertEqual(TabConfig.load(path: path.path), .empty)
         try Data(#"{"dataSource":"x"}"#.utf8).write(to: path)
         let noTabs = TabConfig.load(path: path.path)
-        XCTAssertEqual(noTabs.tabs, [.now, .waiting, .activity, .other, .find])
+        XCTAssertEqual(noTabs.tabs, [.now, .waiting, .activity, .other])
         XCTAssertEqual(noTabs.tab(for: try decode([row("a", area: "Reading")])[0]), .other)
     }
 
@@ -140,10 +140,88 @@ final class GTDTests: XCTestCase {
         XCTAssertEqual(reply.matches[0].target?.absoluteString, "claude://claude.ai/epitaxy/local_1")
     }
 
-    func testAC11FindTabHoldsNoProjects() throws {
-        let rows = try decode([row("a")])
-        XCTAssertTrue(TabConfig.empty.tabs.contains(.find))
-        XCTAssertTrue(Ranking.view(.find, rows: rows, today: today, calendar: calendar).actionable.isEmpty)
+    func testAC58NotchHasNoFindTab() {
+        XCTAssertEqual(TabConfig.empty.tabs, [.now, .waiting, .activity, .other])
+    }
+
+    private func waitingItem(_ id: String, _ title: String, needsYou: Bool = true, local: String? = nil) -> AttentionItem {
+        AttentionItem(id: id, title: title, reason: needsYou ? "等你回覆" : "做完了", folder: "repo", at: Date(timeIntervalSince1970: 0),
+                      needsYou: needsYou, target: local.flatMap { URL(string: "claude://claude.ai/epitaxy/\($0)") })
+    }
+
+    func testAC53EmptyQueryListsWaitingSessionsInOrder() {
+        let waiting = (1...10).map { waitingItem("s\($0)", "等你 \($0)", local: "local_\($0)") }
+        let sessions = [DesktopSession(sessionId: "local_99", cliSessionId: nil, title: "別的", lastFocusedAt: 9)]
+        let rows = Search.rows(query: "  ", attention: waiting, sessions: sessions, matches: [])
+        XCTAssertEqual(rows.map(\.title), (1...8).map { "等你 \($0)" })
+        XCTAssertEqual(rows[0].note, "等你回覆")
+        XCTAssertTrue(rows[0].waiting)
+    }
+
+    func testAC54FiltersByEveryWordWaitingFirstThenNewest() {
+        let waiting = [waitingItem("t1", "kafka-pm", needsYou: false), waitingItem("s2", "Kafka PM 週報", local: "local_2")]
+        let sessions = [
+            DesktopSession(sessionId: "local_2", cliSessionId: "s2", title: "Kafka PM 週報", lastFocusedAt: 1),
+            DesktopSession(sessionId: "local_3", cliSessionId: nil, title: "kafka 舊的 pm 筆記", lastFocusedAt: 5, cwd: "/r/notes"),
+            DesktopSession(sessionId: "local_4", cliSessionId: nil, title: "PM kafka 新的", lastFocusedAt: 8),
+            DesktopSession(sessionId: "local_5", cliSessionId: nil, title: "只有 kafka", lastFocusedAt: 9),
+            DesktopSession(sessionId: "local_6", cliSessionId: nil, title: "kafka pm 封存", isArchived: true, lastFocusedAt: 9),
+            DesktopSession(sessionId: "local_7", cliSessionId: nil, title: "kafka pm 排程", lastFocusedAt: 9, scheduledTaskId: "x"),
+            DesktopSession(sessionId: "local_8", cliSessionId: nil, title: nil, lastFocusedAt: 9),
+            DesktopSession(sessionId: "local_9", cliSessionId: nil, title: "週報", lastFocusedAt: 2, cwd: "/r/kafka-pm"),
+        ]
+        let rows = Search.rows(query: "kafka PM", attention: waiting, sessions: sessions, matches: [])
+        XCTAssertEqual(rows.map(\.title), ["kafka-pm", "Kafka PM 週報", "PM kafka 新的", "kafka 舊的 pm 筆記", "週報"])
+        XCTAssertNil(rows[0].target)
+        XCTAssertEqual(rows[1].target?.absoluteString, "claude://claude.ai/epitaxy/local_2")
+        XCTAssertEqual(rows.map(\.waiting), [true, true, false, false, false])
+        XCTAssertEqual(rows[3].note, "notes")
+    }
+
+    func testAC55ModelMatchesFollowWithoutRepeatsUpToEight() {
+        let sessions = (1...6).map { DesktopSession(sessionId: "local_\($0)", cliSessionId: nil, title: "登入 \($0)", lastFocusedAt: Double($0)) }
+        let matches = [SessionMatch(id: "local_3", title: "登入 3", cwd: "/r/a"), SessionMatch(id: "local_20", title: "修 auth", cwd: "/r/a"),
+                       SessionMatch(id: "local_21", title: "sign-in", cwd: "/r/b"), SessionMatch(id: "local_22", title: "第九個", cwd: "/r/b")]
+        let rows = Search.rows(query: "登入", attention: [], sessions: sessions, matches: matches)
+        XCTAssertEqual(rows.map(\.title), ["登入 6", "登入 5", "登入 4", "登入 3", "登入 2", "登入 1", "修 auth", "sign-in"])
+        XCTAssertEqual(rows[6].note, "a")
+        XCTAssertEqual(Search.rows(query: "", attention: [], sessions: sessions, matches: matches), [])
+    }
+
+    func testAC56SelectionFollowsTheRowNotItsPosition() {
+        let rows = Search.rows(query: "", attention: [waitingItem("a", "A"), waitingItem("b", "B")], sessions: [], matches: [])
+        XCTAssertEqual(Search.index(of: rows[1].id, in: rows), 1)
+        let reordered = Search.rows(query: "", attention: [waitingItem("c", "C"), waitingItem("b", "B"), waitingItem("a", "A")], sessions: [], matches: [])
+        XCTAssertEqual(Search.index(of: rows[1].id, in: reordered), 1)
+        XCTAssertEqual(Search.index(of: rows[0].id, in: reordered), 2)
+        XCTAssertEqual(Search.index(of: "gone", in: reordered), 0)
+        XCTAssertEqual(Search.index(of: nil, in: reordered), 0)
+    }
+
+    func testAC54WaitingSessionWithoutLinkBorrowsItFromTheDesktopSession() {
+        let waiting = [waitingItem("cli-1", "部署")]
+        let sessions = [DesktopSession(sessionId: "local_1", cliSessionId: "cli-1", title: "部署", lastFocusedAt: 1)]
+        for query in ["", "部署"] {
+            let rows = Search.rows(query: query, attention: waiting, sessions: sessions, matches: [])
+            XCTAssertEqual(rows.count, 1, query)
+            XCTAssertTrue(rows[0].waiting)
+            XCTAssertEqual(rows[0].target?.absoluteString, "claude://claude.ai/epitaxy/local_1")
+        }
+    }
+
+    func testAC56SelectionStaysInsideTheList() {
+        XCTAssertEqual(Search.move(0, by: -1, count: 3), 0)
+        XCTAssertEqual(Search.move(0, by: 1, count: 3), 1)
+        XCTAssertEqual(Search.move(2, by: 1, count: 3), 2)
+        XCTAssertEqual(Search.move(5, by: 0, count: 3), 2)
+        XCTAssertEqual(Search.move(0, by: 1, count: 0), 0)
+    }
+
+    func testAC54DecodesTheFieldsSearchNeeds() {
+        let json = #"{"sessionId":"local_1","title":"t","cwd":"/r/app","scheduledTaskId":"job","lastFocusedAt":5}"#
+        let session = DesktopSession.decode(Data(json.utf8))
+        XCTAssertEqual(session?.cwd, "/r/app")
+        XCTAssertEqual(session?.scheduledTaskId, "job")
     }
 
     func entry(_ title: String, area: String, minutes: Int, on date: String) -> String {

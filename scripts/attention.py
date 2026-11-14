@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Claude Code hook: record which sessions are waiting for the user (AC33-AC35),
-and let GTD Island answer permission requests and AskUserQuestion (AC43-AC47).
+and let GTD Island answer permission requests (AC43-AC47).
 
 Reads one hook event as JSON from stdin and writes or deletes
 ~/.gtd-island/attention/<session_id>.json. Standard library only, so it runs
@@ -25,7 +25,7 @@ COMMAND = "python3 -I ~/.gtd-island/attention.py"
 SESSION_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 # Event name -> (matcher, timeout in seconds). "" means every tool or no matcher.
 EVENTS = {
-    "PreToolUse": ("AskUserQuestion", 130),
+    "PreToolUse": ("AskUserQuestion", 5),
     "PermissionRequest": ("", 130),
     "PostToolUse": ("*", 5),
     "Notification": ("", 5),
@@ -99,13 +99,6 @@ def ask_island(base, session, request, wait=WAIT, poll=POLL, sleep=time.sleep, c
     finally:
         remove(req_path)
         remove(res_path)
-
-
-def joined(answers):
-    out = {}
-    for question, value in (answers or {}).items():
-        out[str(question)] = ", ".join(map(str, value)) if isinstance(value, list) else str(value)
-    return out
 
 
 def read(path):
@@ -195,16 +188,7 @@ def decide(event, base=BASE, **wait):
             return {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
                                            "decision": {"behavior": "deny", "message": DENIED}}}
         return None
-    if name == "PreToolUse" and tool == "AskUserQuestion":
-        questions = tool_input.get("questions")
-        if not isinstance(questions, list) or not questions:
-            return None
-        reply = ask_island(base, session, {**common, "kind": "question", "questions": questions}, **wait)
-        answers = (reply or {}).get("answers")
-        if not isinstance(answers, dict) or not answers:
-            return None
-        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                       "updatedInput": {**tool_input, "answers": joined(answers)}}}
+    # AC45: AskUserQuestion is only recorded; waiting here would hide the question in Claude Code.
     return None
 
 

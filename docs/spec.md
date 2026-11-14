@@ -34,6 +34,7 @@
 - AC27 有 token 時,`refresh.py` 另外查開著的 Action(`Item Type` 是 Action,`GTD Status` 不是 Done 也不是 Dropped),寫進快照的 `actions`。每筆含標題、頁面、`Owner Session`、`GTD Status` 和 `Parent Project` 的頁面 id。這個查詢失敗時 `actions` 是 null,Project 列照常更新,跳轉只用 AC5 的 (1) 和 (4)。
 
 ### 找 session prototype(2026-11-04)
+> 2026-11-14:AC11、AC13 由「搜尋框」一節的 AC52–AC58 取代。「找 session」分頁和 Option+J 已移除。AC12 的比對方式和 AC14 的模型程序沿用,改由搜尋框使用。
 目的:先看效果,再決定細節。使用者輸入一句話,相關的 session 要列在上方。排名不必精準。
 Example:使用者按 Option+J,輸入「上週修到一半的登入錯誤」。清單前 5 列都是登入相關的 session,例如 `修登入錯誤(接手)`、`登入流程重構`。使用者按 ⌘1 打開第 1 列。
 - AC11 Option+J 展開面板、切到「找 session」分頁,文字框取得鍵盤焦點。其他方式打開面板時,文字框不自動取得焦點。
@@ -65,7 +66,7 @@ Example:使用者打開「動態」分頁,面板立刻同步。使用者留在�
 ### 分頁設定檔(2026-11-05)
 目的:分頁屬於使用者的 GTD 分類,不屬於程式碼。公開程式碼時不會公開使用者的工作分類,別人也能用自己的分類。
 Example:`config.json` 有 `"tabs": [{"name": "工作", "areas": ["Client Work"]}, {"name": "閱讀", "areas": ["Reading"], "titlePrefixes": ["讀書會"], "linkContains": ["reading-notes"]}]`。面板的分頁列是「先看這 3 件、動態、工作、閱讀、其他、找 session」。Area 是 `Client Work`、標題以 `讀書會` 開頭的 Project 顯示在「閱讀」。
-- AC23 每個分頁有 `name`,以及可省略的 `areas`、`titlePrefixes`、`linkContains`。分頁列依序是:先看這 3 件、等你(AC36)、動態、設定檔的分頁(依檔案順序)、其他、找 session。
+- AC23 每個分頁有 `name`,以及可省略的 `areas`、`titlePrefixes`、`linkContains`。分頁列依序是:先看這 3 件、等你(AC36)、動態、設定檔的分頁(依檔案順序)、其他。
 - AC24 Project 的分頁依序決定:任一分頁的 `titlePrefixes` 符合標題,或 `linkContains` 符合 `Worktree`、`Source URL`;再來是 `areas` 符合 Area;都不符合就是「其他」。同一步有多個分頁符合時,取檔案中較前面的分頁。
 - AC25 檔案不存在、無法解析或沒有 `tabs` 時,只顯示固定分頁,所有 Project 在「其他」。`name` 是空字串、與固定分頁同名或與前面分頁同名的分頁會被忽略。
 - AC26 面板只在啟動時讀設定檔。改設定檔後要重開面板。
@@ -89,11 +90,24 @@ Example:使用者同時開 3 個 session。「發布 1.0」問了一個選項題
 Example:session「發布 1.0」要執行 `npm publish`,需要權限。瀏海自動展開到「等你」分頁,第 1 列顯示「Bash · npm publish」和「允許」「拒絕」「到 app 處理」。使用者按「允許」,指令執行,這一列消失。另一個 session 問「要用哪個方案?」,選項是 A、B;使用者在瀏海點 B 再按「送出」,Claude 收到答案 B。
 - AC43 面板執行時,每 3 秒更新 `~/.gtd-island/island.alive` 的修改時間。hook 只在這個檔案 10 秒內更新過時才在瀏海詢問;否則照 AC33–AC35,不等待。
 - AC44 `PermissionRequest` 事件:hook 先照 AC34 寫入 `needsYou`(`message` 是「工具 · 摘要」),再寫入請求檔 `~/.gtd-island/requests/<請求 id>.json`,然後每 0.2 秒檢查回覆檔 `~/.gtd-island/responses/<請求 id>.json`,最多 120 秒。回覆 `allow` 時輸出允許,`deny` 時輸出拒絕和「使用者在 GTD Island 拒絕」。摘要是 `command`、`file_path`、`url` 或 `pattern` 中第一個有值的欄位。
-- AC45 `PreToolUse` 的 `AskUserQuestion`:hook 照 AC34 寫入紀錄,再照 AC44 送出請求並等待。回覆帶 `answers` 時,輸出 `permissionDecision: allow`,`updatedInput` 是原本的 `questions` 加上 `answers`。`answers` 的鍵是問題文字,值是選到的選項標籤;多選時用「, 」連接。
+- AC45 `PreToolUse` 的 `AskUserQuestion`:hook 只照 AC34 寫入紀錄,不送請求、不等待,也不輸出文字,讓問題立刻出現在 Claude Code。(2026-11-14 改:原本 hook 會等瀏海回答最多 120 秒,這段時間 Claude Code 不顯示問題,使用者無法在 app 裡回答。在瀏海回答選項題先拿掉,之後再討論。面板裡顯示選項題的程式碼還在,但不會再收到選項題請求。)
 - AC46 回覆 `skip`、等待逾時、請求檔被刪除,或回覆檔無法解析時,hook 刪除自己的請求檔和回覆檔,不輸出任何文字,結束碼 0,讓 Claude 照原本的方式詢問。hook 的任何錯誤也是這樣處理。
 - AC47 `UserPromptSubmit`、`SessionEnd`、`Stop` 和 `PostToolUse` 刪除該 session 的所有請求檔,讓還在等待的 hook 結束。使用者在 app 裡回答後,瀏海上的請求就消失。
 - AC48 「等你」分頁把請求顯示在對應 session 的列上。權限請求有「允許」「拒絕」「到 app 處理」。選項題每題列出選項,單選題點一下就選定,多選題可以點多個;每題都選了才能按「送出」;另有「到 app 處理」。超過 130 秒的請求檔不顯示。
 - AC49 出現新的請求時,面板自動展開到「等你」分頁,但不搶鍵盤焦點。滑鼠進入面板後,面板才取得焦點,按鈕第一下點擊就有效。
-- AC50 `install.sh` 照 AC41 加上 `PermissionRequest` 事件,並把 `PreToolUse` 和 `PermissionRequest` 的 hook 逾時設為 130 秒;已經安裝過的同一個指令只更新逾時。
+- AC50 `install.sh` 照 AC41 加上 `PermissionRequest` 事件,並把它的 hook 逾時設為 130 秒;`PreToolUse` 的逾時是 5 秒。已經安裝過的同一個指令只更新逾時。
 - AC51 `AskUserQuestion` 的 `PermissionRequest` 事件:hook 不寫紀錄、不送請求,也不輸出文字。在瀏海按「到 app 處理」後,Claude Code 會為同一題再發出這個事件;它若顯示成權限卡,按「允許」會讓問題沒有答案就過關。
 - 已知限制:CodeIsland 的 hook 也會回答權限請求。兩者都回答時,Claude Code 採用哪一個沒有文件說明,所以這一階段完成後要移除 CodeIsland 的 hooks。選項題在等待期間,app 不會顯示這個問題,要按「到 app 處理」或等 120 秒。
+
+### 搜尋框(2026-11-14)
+目的:使用者不離開鍵盤就能找到任何 session 並跳過去,不依賴 Raycast。瀏海只負責顯示;找和跳轉在搜尋框做。這是控制中樞的第一階段。
+Example:使用者在任何 app 按 Option+Space。螢幕中央出現搜尋框,下面先列出 2 個等你的 session。使用者輸入「kafka pm」,清單立刻換成標題含這兩個字的 session,等你的排最前面。使用者按 ↓ 再按 Enter,桌面 app 跳到第 2 列的 session,搜尋框關閉。
+- AC52 Option+Space 在滑鼠所在的螢幕中央偏上打開搜尋框,文字框取得鍵盤焦點。再按一次、按 Esc、點擊搜尋框以外的地方,或搜尋框失去鍵盤焦點時,搜尋框關閉,文字清空。Option+Space 被其他 app 佔用時,面板顯示錯誤。
+- AC53 沒有輸入文字時,清單是「等你」的 session,順序和「等你」分頁相同(AC37),最多 8 列。
+- AC54 有輸入文字時,候選是「等你」的 session,加上桌面 app 的 session(排除已封存、排程產生、沒有標題的)。輸入以空白切成字詞;標題或資料夾名稱包含每一個字詞(不分大小寫)的候選才列出。順序:等你的 session 在前(順序同 AC53),其餘依最後開啟時間由新到舊。
+- AC55 AC12 的模型比對結果排在 AC54 的結果後面,已經列出的 session 不重複。合計最多 8 列。模型還沒回覆或無法使用時,AC54 的結果照常顯示;模型無法使用時另外顯示錯誤。
+- AC56 ↑ ↓ 移動選取的列,不超出清單;輸入改變,或模型結果讓清單改變時,選取回到第 1 列。Enter 或點擊打開選取的列:桌面 app 跳到該 session,搜尋框關閉。終端機的 session 沒有跳轉連結,標示「在終端機」,Enter 不做任何事。輸入法選字中的 Enter、Esc、↑、↓ 交給輸入法。
+- AC59 選取跟著列,不跟著位置:清單因為「等你」更新而重排時,選取的仍是同一個 session;那一列消失時回到第 1 列。等你的 session 還沒有跳轉連結時,借用同一個桌面 app session 的連結,不重複列出。輸入改變後,舊輸入的模型結果不顯示。滑鼠經過瀏海不會搶走搜尋框的鍵盤焦點。
+- AC57 AC14 的模型程序在搜尋框打開時啟動,關閉時結束。
+- AC58 瀏海面板不再有「找 session」分頁,Option+J 不再註冊。搜尋框開著時,新的請求照 AC49 展開瀏海,不搶搜尋框的鍵盤焦點。
+- 第一階段不做:跳到終端機或 herdr 的 session、派發任務、搜尋 GTD 項目、自訂快捷鍵。

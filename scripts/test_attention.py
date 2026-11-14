@@ -159,16 +159,15 @@ class IslandTests(unittest.TestCase):
         with open(os.path.join(self.base, "attention", "s1.json")) as f:
             self.assertEqual(json.load(f)["message"], "Bash · npm publish")
 
-    def test_ac45_question_answers_go_into_updated_input(self):
+    def test_ac45_question_is_only_recorded_never_asked(self):
         q = {"questions": [{"question": "方案?", "header": "方案", "multiSelect": False,
                             "options": [{"label": "A", "description": ""}, {"label": "B", "description": ""}]},
                            {"question": "環境?", "header": "環境", "multiSelect": True,
                             "options": [{"label": "dev", "description": ""}, {"label": "prod", "description": ""}]}]}
         e = event("PreToolUse", tool_name="AskUserQuestion", tool_input=q)
-        out = self.decide(e, {"answers": {"方案?": "B", "環境?": ["dev", "prod"]}})
-        self.assertEqual(out, {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                                      "updatedInput": {**q, "answers": {"方案?": "B", "環境?": "dev, prod"}}}})
-        self.assertEqual(self.seen[0]["questions"], q["questions"])
+        self.assertIsNone(self.decide(e, {"answers": {"方案?": "B", "環境?": ["dev", "prod"]}}))
+        self.assertEqual(self.seen, [])
+        self.assertEqual(self.requests(), [])
 
     def test_ac51_permission_for_ask_user_question_is_ignored(self):
         e = event("PermissionRequest", tool_name="AskUserQuestion", tool_input={"questions": [{"question": "q?"}]})
@@ -271,13 +270,13 @@ class IslandTests(unittest.TestCase):
     def test_ac50_install_updates_timeouts_of_existing_entries(self):
         path = os.path.join(self.base, "settings.json")
         old = {"hooks": {"PreToolUse": [{"matcher": "AskUserQuestion",
-                                         "hooks": [{"type": "command", "command": "cmd", "timeout": 5}]}]}}
+                                         "hooks": [{"type": "command", "command": "cmd", "timeout": 130}]}]}}
         attention.write(path, old)
         added = attention.install_hooks(path, "cmd")
         self.assertNotIn("PreToolUse", added)
         self.assertIn("PermissionRequest", added)
         settings = attention.read(path)
-        self.assertEqual(settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 130)
+        self.assertEqual(settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"], 5)
         self.assertEqual(settings["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"], 130)
         self.assertEqual(len(settings["hooks"]["PreToolUse"]), 1)
 

@@ -7,7 +7,7 @@ Status: proof of concept. The UI is in Traditional Chinese.
 ## Requirements
 
 - macOS 14, Swift 5.9
-- [uv](https://github.com/astral-sh/uv) for the session finder
+- [uv](https://github.com/astral-sh/uv) for the search box's model
 - A Notion integration that can read your GTD Items and Time Log data sources
 
 ## Setup
@@ -43,7 +43,11 @@ Status: proof of concept. The UI is in Traditional Chinese.
 
 `install.sh` also adds `scripts/attention.py` as a Claude Code hook in `~/.claude/settings.json`, after saving a backup as `settings.json.bak-gtd-island`. The hook records which sessions are waiting for you in `~/.gtd-island/attention/`, and the 等你 tab lists them. The hook uses only the Python standard library.
 
-The session finder also needs an ONNX export of `multilingual-e5-small` in `~/.gtd-island/models/multilingual-e5-small/`. The other tabs work without it.
+The search box's related-session matching needs an ONNX export of `multilingual-e5-small` in `~/.gtd-island/models/multilingual-e5-small/`. Title matching works without it.
+
+## Search box
+
+Press Option+Space anywhere to open a search box in the middle of the screen. With no text it lists the sessions waiting for you. Type to filter Claude desktop sessions by title or folder; the local model adds related sessions below. Use ↑ ↓ and Enter to jump to a session, Esc to close. If another launcher already uses Option+Space, change its shortcut.
 
 ## Tests
 

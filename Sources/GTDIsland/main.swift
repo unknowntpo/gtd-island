@@ -67,7 +67,6 @@ final class Store: ObservableObject {
     @Published var tab: GTDTab = .now {
         didSet {
             guard tab != oldValue else { return }
-            if tab == .find { startRoute() } else { stopRoute() }
             if tab == .activity { startActivitySync() } else { stopActivitySync() }
         }
     }
@@ -83,8 +82,12 @@ final class Store: ObservableObject {
     @Published var matches: [SessionMatch] = []
     @Published var isRouting = false
     @Published var routeError: String?
-    /// Set only by the Option+J path, so the text field never takes focus on hover or click.
-    @Published var wantsFieldFocus = false
+    @Published var searchOpen = false
+    /// The selected row of the search box (AC56), by id; nil means the first row.
+    @Published var selectedID: String?
+    var selection: Int { Search.index(of: selectedID, in: searchRows) }
+    private var sessions: [DesktopSession] = []
+    var closeSearch: () -> Void = {}
     @Published var attention: [AttentionItem] = []
     /// How the collapsed panel is drawn; set by AppDelegate from where the panel sits.
     @Published var notch = NotchLayout(atTop: false, gap: 0, menuBar: 24)
@@ -101,6 +104,7 @@ final class Store: ObservableObject {
     private var route: RouteProcess?
     private var routeGeneration = 0
     private var sent = 0
+    private var sentText = ""
     private var received = 0
     private var debounce: Task<Void, Never>?
 
@@ -122,11 +126,11 @@ final class Store: ObservableObject {
                         guard let self, generation == self.routeGeneration else { return }
                         self.route = nil
                         self.isRouting = false
-                        self.routeError = "模型無法使用。請重新執行 install.sh,其他分頁不受影響。"
+                        self.routeError = "模型無法使用,只比對標題。請重新執行 install.sh。"
                     }
                 })
         } catch {
-            routeError = "模型無法使用。請重新執行 install.sh,其他分頁不受影響。"
+            routeError = "模型無法使用,只比對標題。請重新執行 install.sh。"
         }
     }
 
@@ -142,11 +146,49 @@ final class Store: ObservableObject {
         received = 0
     }
 
+    var searchRows: [SearchRow] {
+        Search.rows(query: query, attention: attention, sessions: sessions, matches: matches)
+    }
+
+    /// Reads the session list once per opening and starts the model helper (AC57).
+    func openSearch() {
+        sessions = DesktopSession.all(root: desktopSessionsRoot)
+        selectedID = nil
+        searchOpen = true
+        startRoute()
+    }
+
+    func endSearch() {
+        searchOpen = false
+        stopRoute()
+        selectedID = nil
+    }
+
+    func moveSelection(_ step: Int) {
+        let rows = searchRows
+        let next = Search.move(Search.index(of: selectedID, in: rows), by: step, count: rows.count)
+        if rows.indices.contains(next) { selectedID = rows[next].id }
+    }
+
+    func open(_ row: SearchRow) {
+        guard let target = row.target else { return }
+        NSWorkspace.shared.open(target)
+        closeSearch()
+    }
+
+    func openSelected() {
+        let rows = searchRows
+        let index = Search.index(of: selectedID, in: rows)
+        if rows.indices.contains(index) { open(rows[index]) }
+    }
+
     func queryChanged() {
         debounce?.cancel()
+        selectedID = nil
+        // Matches belong to the text they were found for.
+        matches = []
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            matches = []
             isRouting = false
             return
         }
@@ -154,6 +196,7 @@ final class Store: ObservableObject {
             try? await Task.sleep(nanoseconds: 200_000_000)
             guard !Task.isCancelled, let self, let route = self.route else { return }
             self.sent += 1
+            self.sentText = text
             self.isRouting = true
             route.send(text)
         }
@@ -164,18 +207,12 @@ final class Store: ObservableObject {
         received += 1
         guard received == sent else { return }
         isRouting = false
-        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // A reply for text the user has since changed is dropped; the new text gets its own reply.
+        guard query.trimmingCharacters(in: .whitespacesAndNewlines) == sentText, !sentText.isEmpty else { return }
         routeError = reply == nil ? "模型回覆無法解析。" : reply?.error
+        let before = searchRows
         matches = reply?.matches ?? []
-    }
-
-    func open(_ match: SessionMatch) {
-        if let target = match.target { NSWorkspace.shared.open(target) }
-        collapse()
-    }
-
-    func openMatch(number: Int) {
-        if number >= 1, number <= matches.count { open(matches[number - 1]) }
+        if searchRows != before { selectedID = nil }
     }
 
     var visible: (actionable: [Project], waiting: [Project]) {
@@ -280,7 +317,7 @@ final class Store: ObservableObject {
         if items != attention { attention = items }
         let ids = Set(requests.map(\.id))
         let fresh = !ids.subtracting(seenRequests).isEmpty
-        // A request that arrives while the 找 session tab is open stays unseen, so it opens the panel later.
+        // A request the panel could not show stays unseen, so it opens the panel later.
         if !fresh || onNewRequest() { seenRequests = ids }
         choices = choices.filter { ids.contains($0.key) }
         removeOldReplies()
@@ -545,31 +582,29 @@ struct ActivityChart: View {
     }
 }
 
-struct MatchRow: View {
-    let index: Int
-    let match: SessionMatch
+struct SearchRowView: View {
+    let row: SearchRow
+    let selected: Bool
     let action: () -> Void
     @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
             HStack(alignment: .center, spacing: 10) {
-                Text("⌘\(index)").font(.system(size: 11, design: .monospaced)).foregroundColor(.islandMuted)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(match.title).font(.system(size: 13, weight: .semibold)).foregroundColor(.islandText)
-                        .lineLimit(2).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
-                    if !match.folder.isEmpty {
-                        Text(match.folder).font(.system(size: 11)).foregroundColor(.islandMuted).lineLimit(1)
+                Circle().fill(row.waiting ? Color.islandAccent : Color.clear).frame(width: 6, height: 6)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.title).font(.system(size: 14, weight: .semibold)).foregroundColor(.islandText).lineLimit(1)
+                    if !row.note.isEmpty {
+                        Text(row.note).font(.system(size: 11)).foregroundColor(row.waiting ? .islandAccent : .islandMuted).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 0)
-                Text("打開 ↗").font(.system(size: 11, weight: .semibold)).foregroundColor(.islandAccent)
+                Text(row.target == nil ? "在終端機" : (selected ? "打開 ↩" : "")).font(.system(size: 11)).foregroundColor(.islandMuted)
             }
-            .padding(10)
+            .padding(.horizontal, 12).padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isHovering ? Color.islandBorder : Color.islandCard)
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(isHovering ? Color.islandAccent : Color.islandBorder))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .background(selected ? Color.islandBorder : (isHovering ? Color.islandCard : Color.clear))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -577,48 +612,59 @@ struct MatchRow: View {
     }
 }
 
-struct FindView: View {
+/// The Raycast-like search box (AC52-AC56). It sits in its own window, apart from the notch panel.
+struct SearchView: View {
     @ObservedObject var store: Store
     @FocusState private var isFieldFocused: Bool
 
-    func takeFocusIfAsked() {
-        guard store.wantsFieldFocus else { return }
-        store.wantsFieldFocus = false
-        DispatchQueue.main.async { isFieldFocused = true }
-    }
-
-    var hint: String {
-        if store.isRouting { return store.matches.isEmpty ? "比對中…第一次要載入模型,大約幾秒。" : "比對中…" }
-        return "輸入一句話,相關的 session 會列在這裡。Enter 打開第 1 列。"
+    var hint: String? {
+        if store.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return store.searchRows.isEmpty ? "沒有等你的 session。輸入文字找其他 session。" : nil
+        }
+        if store.isRouting { return "模型比對中…" }
+        return store.searchRows.isEmpty ? "找不到符合的 session。" : nil
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TextField("例如:上週修到一半的登入錯誤", text: $store.query)
-                .textFieldStyle(.plain).font(.system(size: 13)).foregroundColor(.islandText)
-                .padding(8)
-                .background(Color.islandCard)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(isFieldFocused ? Color.islandAccent : Color.islandBorder))
-                .focused($isFieldFocused)
-                .onSubmit { store.openMatch(number: 1) }
-                .onChange(of: store.query) { _ in store.queryChanged() }
-                .onChange(of: store.wantsFieldFocus) { _ in takeFocusIfAsked() }
-                .onAppear(perform: takeFocusIfAsked)
-            if let error = store.routeError {
-                Text("× \(error)").font(.system(size: 12)).foregroundColor(Color(red: 0.96, green: 0.69, blue: 0.67))
+        let rows = store.searchRows
+        let selection = Search.index(of: store.selectedID, in: rows)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").font(.system(size: 16)).foregroundColor(.islandMuted)
+                TextField("找 session…", text: $store.query)
+                    .textFieldStyle(.plain).font(.system(size: 20)).foregroundColor(.islandText)
+                    .focused($isFieldFocused)
+                    .onChange(of: store.query) { _ in store.queryChanged() }
             }
-            if store.isRouting || store.matches.isEmpty {
-                Text(hint).font(.system(size: 12)).foregroundColor(.islandMuted)
+            .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 8)
+            Rectangle().fill(Color.islandBorder).frame(height: 1)
+            if store.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !rows.isEmpty {
+                Text("等你").font(.system(size: 11, weight: .semibold)).foregroundColor(.islandMuted).padding(.horizontal, 14).padding(.top, 4)
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(store.matches.enumerated()), id: \.element.id) { i, match in
-                        MatchRow(index: i + 1, match: match) { store.open(match) }
-                    }
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
+                    SearchRowView(row: row, selected: i == selection) { store.open(row) }
                 }
             }
+            .padding(.horizontal, 6)
+            if let error = store.routeError {
+                Text("× \(error)").font(.system(size: 11)).foregroundColor(Color(red: 0.96, green: 0.69, blue: 0.67)).padding(.horizontal, 14)
+            }
+            if let hint { Text(hint).font(.system(size: 12)).foregroundColor(.islandMuted).padding(.horizontal, 14) }
+            HStack(spacing: 12) {
+                Spacer()
+                Text("↑↓ 選擇").font(.system(size: 11)).foregroundColor(.islandMuted)
+                Text("↩ 打開").font(.system(size: 11)).foregroundColor(.islandMuted)
+                Text("esc 關閉").font(.system(size: 11)).foregroundColor(.islandMuted)
+            }
+            .padding(.horizontal, 14).padding(.bottom, 10).padding(.top, 2)
         }
-        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.islandBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.islandBorder))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onChange(of: store.searchOpen) { open in if open { DispatchQueue.main.async { isFieldFocused = true } } }
+        .onAppear { isFieldFocused = true }
     }
 }
 
@@ -811,9 +857,7 @@ struct ExpandedView: View {
             if let error = store.error {
                 Text("× \(error)").font(.system(size: 12)).foregroundColor(Color(red: 0.96, green: 0.69, blue: 0.67))
             }
-            if store.tab == .find {
-                FindView(store: store)
-            } else if store.tab == .waiting {
+            if store.tab == .waiting {
                 AttentionView(store: store)
             } else if store.tab == .activity {
                 ActivityChart(store: store)
@@ -889,7 +933,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = Store()
     var panel: IslandPanel!
     var hotKey: EventHotKeyRef?
-    var findHotKey: EventHotKeyRef?
+    var searchHotKey: EventHotKeyRef?
+    var searchPanel: IslandPanel!
+    let searchSize = NSSize(width: 640, height: 520)
     var hoverOpen: DispatchWorkItem?
     /// Watches the mouse while the panel is open, to close it after the mouse leaves (AC42).
     var leaveWatch: Timer?
@@ -913,6 +959,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         signal(SIGPIPE, SIG_IGN)
         store.collapse = { [weak self] in self?.setExpanded(false) }
         store.onNewRequest = { [weak self] in self?.showRequests() ?? true }
+        store.closeSearch = { [weak self] in self?.hideSearch() }
+        searchPanel = IslandPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        searchPanel.level = .statusBar
+        searchPanel.isOpaque = false
+        searchPanel.backgroundColor = .clear
+        searchPanel.hasShadow = false
+        searchPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        searchPanel.hidesOnDeactivate = false
+        let searchHost = NSHostingView(rootView: SearchView(store: store).environment(\.colorScheme, .dark))
+        searchHost.sizingOptions = []
+        searchPanel.contentView = searchHost
+        NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: searchPanel, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.hideSearch() }
+        }
         panel = IslandPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .statusBar
         panel.isOpaque = false
@@ -938,26 +998,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if CommandLine.arguments.contains("--selftest") { runSelfTest(); return }
         if CommandLine.arguments.contains("--selftest-drag") { runDragSelfTest(); return }
         if CommandLine.arguments.contains("--selftest-leave") { runLeaveSelfTest(); return }
-        if let flag = CommandLine.arguments.firstIndex(of: "--selftest-find"), flag + 1 < CommandLine.arguments.count {
-            runFindSelfTest(query: CommandLine.arguments[flag + 1]); return
+        if let flag = CommandLine.arguments.firstIndex(of: "--selftest-search"), flag + 1 < CommandLine.arguments.count {
+            runSearchSelfTest(query: CommandLine.arguments[flag + 1]); return
         }
 
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.store.isExpanded else { return event }
-            // Esc and Enter belong to the input method while it is composing text.
-            if (self.panel.firstResponder as? NSTextView)?.hasMarkedText() == true { return event }
+            guard let self else { return event }
+            if self.store.searchOpen, event.window === self.searchPanel { return self.searchKey(event) }
+            guard self.store.isExpanded else { return event }
             if event.keyCode == UInt16(kVK_Escape) { self.setExpanded(false); return nil }
             guard let digit = Int(event.charactersIgnoringModifiers ?? "") else { return event }
             let modifiers = event.modifierFlags.intersection([.command, .control, .option])
-            if self.store.tab == .find {
-                if modifiers == .command { self.store.openMatch(number: digit); return nil }
-                return event
-            }
             if modifiers.isEmpty { self.store.open(number: digit); return nil }
             return event
         }
         NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
-            MainActor.assumeIsolated { self?.setExpanded(false) }
+            MainActor.assumeIsolated {
+                self?.setExpanded(false)
+                self?.hideSearch()
+            }
         }
     }
 
@@ -1026,29 +1085,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         exit(ok ? 0 : 1)
     }
 
-    /// Checks focus on both paths, then runs one real query through `route.py`.
-    func runFindSelfTest(query: String) {
-        setExpanded(true)
-        store.tab = .find
+    /// Keys of the search box (AC56). The input method keeps them while it is composing text.
+    func searchKey(_ event: NSEvent) -> NSEvent? {
+        if (searchPanel.firstResponder as? NSTextView)?.hasMarkedText() == true { return event }
+        switch Int(event.keyCode) {
+        case kVK_Escape: hideSearch()
+        case kVK_DownArrow: store.moveSelection(1)
+        case kVK_UpArrow: store.moveSelection(-1)
+        case kVK_Return, kVK_ANSI_KeypadEnter: store.openSelected()
+        default: return event
+        }
+        return nil
+    }
+
+    /// Opens the search box, checks focus and the arrow keys, runs one real query, then checks closing clears it.
+    func runSearchSelfTest(query: String) {
+        showSearch()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            let plainOpen = self.panel.firstResponder is NSTextView
-            self.setExpanded(false)
-            let helperStopped = self.store.tab == .now
-            self.showFind()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                let hotKeyOpen = self.panel.firstResponder is NSTextView
-                print("focus after plain open:", plainOpen, "after Option+J path:", hotKeyOpen, "collapse leaves tab:", helperStopped)
-                self.store.query = query
-                self.waitForMatches(deadline: Date().addingTimeInterval(60), started: Date(), ok: !plainOpen && hotKeyOpen)
-            }
+            let focused = self.searchPanel.isKeyWindow && self.searchPanel.firstResponder is NSTextView
+            let notchClosed = !self.store.isExpanded
+            print("search focused:", focused, "notch stays closed:", notchClosed, "waiting rows:", self.store.searchRows.count)
+            self.store.query = query
+            self.waitForMatches(deadline: Date().addingTimeInterval(60), started: Date(), ok: focused && notchClosed)
         }
     }
 
     func waitForMatches(deadline: Date, started: Date, ok: Bool) {
         if !store.matches.isEmpty || Date() > deadline || store.routeError != nil {
             print(String(format: "first reply: %.1f s", Date().timeIntervalSince(started)), "error:", store.routeError ?? "none")
-            store.matches.forEach { print(" -", $0.title, "|", $0.folder) }
-            exit(ok && !store.matches.isEmpty ? 0 : 1)
+            let rows = store.searchRows
+            rows.forEach { print(" -", $0.waiting ? "[等你]" : "", $0.title, "|", $0.note) }
+            store.moveSelection(1); store.moveSelection(1); store.moveSelection(-1)
+            let moved = store.selection == min(1, rows.count - 1)
+            hideSearch()
+            let cleared = store.query.isEmpty && !store.searchOpen && !searchPanel.isVisible
+            print("selection moved:", moved, "closing clears:", cleared)
+            exit(ok && !store.matches.isEmpty && !rows.isEmpty && moved && cleared ? 0 : 1)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.waitForMatches(deadline: deadline, started: started, ok: ok) }
     }
@@ -1121,7 +1193,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard inside, !store.isExpanded else { return }
         // A press on the pill may be the start of a drag, so it does not open the panel.
         let work = DispatchWorkItem { [weak self] in
-            if NSEvent.pressedMouseButtons == 0 { self?.setExpanded(true) }
+            // Passing over the pill must not take the keyboard from the search box (AC58).
+            if NSEvent.pressedMouseButtons == 0, let self { self.setExpanded(true, takeFocus: !self.store.searchOpen) }
         }
         hoverOpen = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
@@ -1130,7 +1203,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Opens the 等你 tab for a new request without taking the keyboard from the current app (AC49).
     @discardableResult
     func showRequests() -> Bool {
-        guard store.tab != .find else { return false }
         if !store.isExpanded {
             setExpanded(true, takeFocus: false)
             openedForRequest = true
@@ -1162,7 +1234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// Closes the panel 0.4 s after the mouse leaves it. A panel opened by keyboard waits until the
-    /// mouse has been inside once; a pressed button (a drag) and the 找 session tab never close it.
+    /// mouse has been inside once; a pressed button (a drag) never closes it.
     func startLeaveWatch() {
         leaveWatch?.invalidate()
         mouseWasInside = panel.frame.contains(NSEvent.mouseLocation)
@@ -1175,8 +1247,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func checkMouseLeft(mouse: CGPoint = NSEvent.mouseLocation, pressed: Bool = NSEvent.pressedMouseButtons != 0, now: Date = Date()) {
         let inside = panel.frame.insetBy(dx: -8, dy: -8).contains(mouse)
         // A panel opened without focus takes it once the mouse is over it, so the first click counts (AC49).
-        if inside, !panel.isKeyWindow, mouse == NSEvent.mouseLocation { panel.makeKey() }
-        if inside || pressed || store.tab == .find {
+        if inside, !panel.isKeyWindow, !store.searchOpen, mouse == NSEvent.mouseLocation { panel.makeKey() }
+        if inside || pressed {
             mouseWasInside = mouseWasInside || inside
             mouseLeftAt = nil
             return
@@ -1190,11 +1262,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if now.timeIntervalSince(left) >= 0.4 { setExpanded(false) }
     }
 
-    func showFind() {
-        store.wantsFieldFocus = true
-        setExpanded(true)
-        store.tab = .find
-        panel.makeKeyAndOrderFront(nil)
+    /// Opens the search box on the screen under the mouse, in the upper middle (AC52).
+    func showSearch() {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.screens[0]
+        let area = screen.visibleFrame
+        let origin = CGPoint(x: area.midX - searchSize.width / 2, y: area.maxY - area.height * 0.2 - searchSize.height)
+        searchPanel.setFrame(NSRect(origin: origin, size: searchSize), display: true)
+        store.openSearch()
+        searchPanel.makeKeyAndOrderFront(nil)
+    }
+
+    func hideSearch() {
+        guard store.searchOpen else { return }
+        store.endSearch()
+        searchPanel.orderOut(nil)
     }
 
     func registerHotKey() {
@@ -1203,11 +1285,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             var pressed = EventHotKeyID()
             GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
                               MemoryLayout<EventHotKeyID>.size, nil, &pressed)
-            let isFind = pressed.id == 2
+            let isSearch = pressed.id == 2
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let app = AppDelegate.shared!
-                    if isFind { app.showFind() } else { app.setExpanded(!app.store.isExpanded) }
+                    if isSearch {
+                        if app.store.searchOpen { app.hideSearch() } else { app.showSearch() }
+                    } else {
+                        app.setExpanded(!app.store.isExpanded)
+                    }
                 }
             }
             return noErr
@@ -1216,9 +1302,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let status = RegisterEventHotKey(UInt32(kVK_ANSI_G), UInt32(optionKey), EventHotKeyID(signature: signature, id: 1),
                                          GetApplicationEventTarget(), 0, &hotKey)
         if status != noErr { store.error = "Option+G 已被其他 app 佔用,請把滑鼠移到膠囊上打開面板。" }
-        let findStatus = RegisterEventHotKey(UInt32(kVK_ANSI_J), UInt32(optionKey), EventHotKeyID(signature: signature, id: 2),
-                                             GetApplicationEventTarget(), 0, &findHotKey)
-        if findStatus != noErr { store.error = "Option+J 已被其他 app 佔用,請點「找 session」分頁後再點文字框。" }
+        let searchStatus = RegisterEventHotKey(UInt32(kVK_Space), UInt32(optionKey), EventHotKeyID(signature: signature, id: 2),
+                                               GetApplicationEventTarget(), 0, &searchHotKey)
+        if searchStatus != noErr { store.error = "Option+Space 已被其他 app 佔用,搜尋框無法用快捷鍵打開。" }
     }
 }
 
@@ -1290,14 +1376,17 @@ if let flag = CommandLine.arguments.firstIndex(of: "--render"), flag + 1 < Comma
         save("activity", ExpandedView(store: store), NSSize(width: 560, height: 560))
         store.hoveredArea = Activity.bars(store.snapshot?.timeLog ?? [], today: Date()).first?.label
         save("activity-hover", ExpandedView(store: store), NSSize(width: 560, height: 560))
-        store.tab = .find
-        save("find-empty", ExpandedView(store: store), NSSize(width: 560, height: 560))
-        store.query = "上週修到一半的登入錯誤"
+        store.tab = .now
+        store.reloadAttention()
+        store.searchOpen = true
+        save("search-empty", SearchView(store: store), NSSize(width: 640, height: 520))
+        store.query = "登入"
         store.matches = [
             SessionMatch(id: "1", title: "修登入錯誤(接手)", cwd: "/repo/app"),
             SessionMatch(id: "2", title: "登入流程重構", cwd: "/repo/app"),
         ]
-        save("find-matches", ExpandedView(store: store), NSSize(width: 560, height: 560))
+        store.selectedID = "2"
+        save("search-matches", SearchView(store: store), NSSize(width: 640, height: 520))
     }
     exit(0)
 }
